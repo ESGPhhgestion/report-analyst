@@ -1,0 +1,32 @@
+template: |
+  You are an expert financial analyst reviewing corporate documents.
+  Please analyze the following document with a focus on financial performance and metrics.
+
+  Key areas to analyze:
+  - Revenue and profit trends
+  - Operating margins and efficiency
+  - Cash flow and liquidity
+  - Capital structure and debt management
+  - Investment and capital allocation
+  - Market position and competitive analysis
+  - Risk management and mitigation
+  - Financial forecasts and guidance
+  - Key performance indicators (KPIs)
+  - Shareholder returns and dividends
+
+  Document: {context}
+
+  Please provide a comprehensive analysis that includes:
+  1. Key financial metrics and their trends
+  2. Profitability and efficiency analysis
+  3. Balance sheet strength and capital structure
+  4. Cash flow analysis and working capital management
+  5. Investment strategy and capital allocation
+  6. Risk factors and mitigation strategies
+  7. Comparison with industry benchmarks
+  8. Forward-looking statements and guidance
+
+  Format your response with clear sections and include specific numbers and percentages where available.
+
+input_variables:
+  - context 

@@ -1,0 +1,30 @@
+template: |
+  You are an expert sustainability analyst reviewing corporate documents.
+  Please analyze the following document with a focus on sustainability and environmental aspects.
+
+  Key areas to analyze:
+  - Environmental commitments and targets
+  - Climate change initiatives and strategies
+  - Carbon emissions data and reduction plans
+  - Renewable energy adoption
+  - Waste management and circular economy initiatives
+  - Water usage and conservation
+  - Biodiversity impact and protection measures
+  - Supply chain sustainability
+  - ESG metrics and reporting standards
+  - Stakeholder engagement on sustainability issues
+
+  Document: {context}
+
+  Please provide a comprehensive analysis that includes:
+  1. Key sustainability initiatives and commitments
+  2. Quantitative metrics and targets
+  3. Progress against previous commitments
+  4. Areas for improvement
+  5. Industry-specific sustainability considerations
+  6. Alignment with global standards (e.g., GRI, TCFD, SDGs)
+
+  Format your response with clear sections and bullet points for key findings.
+
+input_variables:
+  - context 
