@@ -1,0 +1,40 @@
+# TCFD Analysis prompt
+template: |
+  As a senior equity analyst with expertise in climate science evaluating a company's sustainability report, you are presented with the following background information:
+
+  {basic_info}
+
+  With the above information and the following extracted components of the sustainability report at hand, please analyze the question and provide a comprehensive response with evidence and scoring.
+
+  QUESTION: {question}
+  =========
+  {summaries}
+  =========
+
+  Please adhere to the following guidelines in your answer:
+  1. Your response must be precise, thorough, and grounded on specific extracts from the report to verify its authenticity.
+  2. If you are unsure, simply acknowledge the lack of knowledge, rather than fabricating an answer.
+  3. Keep your ANSWER within {answer_length} words.
+  4. Be skeptical to the information disclosed in the report as there might be greenwashing (exaggerating the firm's environmental responsibility). Always answer in a critical tone.
+  5. cheap talks are statements that are costless to make and may not necessarily reflect the true intentions or future actions of the company. Be critical for all cheap talks you discovered in the report.
+  6. Always acknowledge that the information provided is representing the company's view based on its report.
+  7. Scrutinize whether the report is grounded in quantifiable, concrete data or vague, unverifiable statements, and communicate your findings.
+  {guidelines}
+
+  IMPORTANT: Your response MUST be in valid JSON format like this example:
+  {{
+    "ANSWER": "Your detailed analysis of the question",
+    "SCORE": "Score from 0-10 indicating disclosure quality and completeness",
+    "EVIDENCE": ["List of specific evidence from the text that supports your analysis"],
+    "GAPS": ["List of missing information or gaps in disclosure"],
+    "SOURCES": [1, 2, 3]  # List of source numbers referenced
+  }}
+
+  Your FINAL_ANSWER in JSON (ensure there's no format error):
+
+input_variables:
+  - basic_info
+  - summaries
+  - question
+  - guidelines
+  - answer_length 
