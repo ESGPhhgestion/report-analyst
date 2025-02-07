@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import shutil
 
 from llama_index.core import (
@@ -79,9 +79,7 @@ class LlamaVectorStore(BaseVectorStore):
             raise
             
     def add_documents(self, documents: List[Document]) -> None:
-        """
-        Add documents to vector store, creating new if needed or updating existing.
-        """
+        """Add documents to vector store, creating new if needed or updating existing."""
         try:
             # Ensure directory exists
             self.storage_path.mkdir(parents=True, exist_ok=True)
@@ -100,7 +98,12 @@ class LlamaVectorStore(BaseVectorStore):
                 # Add to existing vector store
                 logger.info("Adding documents to existing vector store")
                 for doc in documents:
-                    self.store.insert(doc, batch_size=100)
+                    # Convert to TextNode if needed
+                    if not isinstance(doc, TextNode):
+                        node = TextNode(text=doc.text, metadata=doc.metadata)
+                    else:
+                        node = doc
+                    self.store.insert(node, batch_size=100)
 
             # Persist changes
             logger.info(f"Persisting vector store to {self.storage_path}")
@@ -111,7 +114,7 @@ class LlamaVectorStore(BaseVectorStore):
             logger.error(f"Error adding documents to vector store: {e}")
             raise
             
-    def similarity_search(self, query: str, k: int = 4) -> List[tuple[Document, float]]:
+    def similarity_search(self, query: str, k: int = 4) -> List[Tuple[Document, float]]:
         """Search for similar documents and return documents with their similarity scores."""
         if self.store is None:
             raise ValueError("Vector store not initialized")
@@ -122,7 +125,8 @@ class LlamaVectorStore(BaseVectorStore):
             
             # Get nodes and convert to Document format with scores
             nodes = retriever.retrieve(query)
-            return [(Document(text=node.node.text, metadata=node.node.metadata), node.score) for node in nodes]
+            return [(Document(text=node.node.text, metadata=node.node.metadata), node.score) 
+                   for node in nodes]
             
         except Exception as e:
             logger.error(f"Error during similarity search: {e}")

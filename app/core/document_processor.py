@@ -1,6 +1,6 @@
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 from fastapi import UploadFile
 import fitz  # PyMuPDF
 from models.requests import DocumentMetadata
@@ -13,7 +13,7 @@ class DocumentProcessor:
         self.input_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    async def process_upload(self, file_path: str | Path) -> dict:
+    async def process_upload(self, file_path: Union[str, Path]) -> dict:
         """Process a document from a file path and return metadata"""
         try:
             document_id = str(uuid.uuid4())

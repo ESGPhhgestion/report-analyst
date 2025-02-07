@@ -108,92 +108,61 @@ def save_uploaded_file(uploaded_file) -> Optional[str]:
         return None
 
 def display_results(results: Dict[str, Any], questions: Dict[str, Dict], question_id: int):
-    """Display results for a single question in a clean, organized layout"""
     try:
-        # Get result components
-        result = results.get(question_id, {})
-        answer = result.get("ANSWER", "No answer provided")
-        score = result.get("SCORE", 0)
-        evidence = result.get("EVIDENCE", [])
-        gaps = result.get("GAPS", [])
-        sources = result.get("SOURCES", [])
+        result_json = results  # Use the dictionary directly
         
-        # Display question header with score
-        st.markdown(f"### {questions[question_id]['text']}")
-        st.markdown(
-            f"""
-            <div style="background-color: {'#4CAF50' if score >= 7 else '#FF9800' if score >= 4 else '#F44336'}; 
-                        color: white; 
-                        padding: 0.5rem 1rem; 
-                        border-radius: 0.5rem; 
-                        display: inline-block;
-                        margin-bottom: 1rem;">
-                Score: {score}/10
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        # Convert score to float/int if it's a string
+        score = result_json.get("SCORE", 0)
+        if isinstance(score, str):
+            try:
+                score = float(score)
+            except ValueError:
+                score = 0
         
-        # Analysis section in an accordion (closed by default)
-        with st.expander("Analysis", expanded=False):
-            st.markdown(
-                f"""
-                <div style="padding: 1rem; 
-                            border-radius: 0.5rem; 
-                            background-color: #1e1e1e; 
-                            color: #ffffff;
-                            margin-bottom: 1rem;">
-                    {answer}
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+        # Display score with color based on value
+        score_color = "#ff0000" if score < 5 else "#00ff00"
+        st.markdown(f"""
+            ##### Score: <span style='color: {score_color}'>{score}/10</span>
+        """, unsafe_allow_html=True)
+        
+        # Display answer
+        st.markdown("##### Analysis")
+        st.write(result_json.get("ANSWER", "No answer provided"))
+        
+        # Display evidence
+        evidence = result_json.get("EVIDENCE", [])
+        if evidence:
+            st.markdown("##### Key Evidence")
+            for e in evidence:
+                if isinstance(e, dict):
+                    chunk_num = e.get('chunk', 'Unknown')
+                    evidence_text = e.get('text', '')
+                    st.markdown(f"""
+                        <div style='margin-bottom: 0.5rem;'>
+                            <span style='color: #4CAF50'>✓</span> {evidence_text}
+                            <span style='color: #666; font-size: 0.8em'>[From Chunk {chunk_num}]</span>
+                        </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"✓ {e}")
+        
+        # Display gaps
+        gaps = result_json.get("GAPS", [])
+        if gaps:
+            st.markdown("##### Areas for Improvement")
+            for gap in gaps:
+                st.markdown(f"○ {gap}")
+        
+        # Display sources
+        sources = result_json.get("SOURCES", [])
+        if sources:
+            st.markdown("##### Referenced Sources")
+            st.write(", ".join(f"Source {s}" for s in sources))
             
-            # Evidence and Gaps in a cleaner layout
-            if evidence or gaps:
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    if evidence:
-                        st.markdown("##### Key Evidence")
-                        for e in evidence:
-                            st.markdown(f"✓ {e}")
-                
-                with col2:
-                    if gaps:
-                        st.markdown("##### Areas for Improvement")
-                        for gap in gaps:
-                            st.markdown(f"○ {gap}")
-            
-            # Sources at the bottom of the accordion
-            if sources:
-                st.markdown("---")
-                st.markdown("**Referenced Sources**")
-                sources_text = ", ".join([f"Source {s}" for s in sources])
-                st.markdown(
-                    f"""
-                    <div style="padding: 0.5rem; 
-                                border-radius: 0.5rem; 
-                                background-color: #2d2d2d;
-                                color: #ffffff;">
-                        {sources_text}
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-        
-        # Debug section if needed
-        if "Error:" in answer and hasattr(st.session_state, 'raw_responses'):
-            raw_response = st.session_state.raw_responses.get(question_id)
-            if raw_response:
-                with st.expander("Debug Information", expanded=False):
-                    st.code(raw_response)
-        
-        st.markdown("---")
-    
+    except json.JSONDecodeError as e:
+        st.error(f"Error parsing results: {str(e)}")
     except Exception as e:
-        logger.error(f"Error displaying results for question {question_id}: {str(e)}")
-        st.error(f"Error displaying results for question {question_id}")
+        st.error(f"Error displaying results: {str(e)}")
 
 async def analyze_document_and_display(analyzer, file_path: str, selected_questions: List[int], use_llm_scoring: bool = False, single_call: bool = True):
     """Analyze document and display results as they come in"""
@@ -234,7 +203,7 @@ async def analyze_document_and_display(analyzer, file_path: str, selected_questi
                 with results_container:
                     st.empty()  # Clear previous content
                     for display_id in results["answers"]:
-                        display_results(results["answers"], analyzer.questions, display_id)
+                        display_results(results["answers"][display_id], analyzer.questions, display_id)
                         
                         # Display chunks in a dataframe if available
                         result_data = results["answers"][display_id]

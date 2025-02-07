@@ -9,7 +9,7 @@ import json
 from typing import AsyncGenerator, Dict, List
 import logging
 
-from .core.analyzer import DocumentAnalyzer
+from core.analyzer import DocumentAnalyzer
 
 # Load environment variables
 load_dotenv()

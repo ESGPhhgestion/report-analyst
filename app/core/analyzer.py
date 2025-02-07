@@ -11,13 +11,13 @@ import hashlib
 import pickle
 
 from langchain_openai import ChatOpenAI
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
 from llama_index.core import Document, Settings
 from llama_index.embeddings.openai import OpenAIEmbedding
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain.chains.summarize import load_summarize_chain
+from llama_index.readers.file import PyMuPDFReader
+from llama_index.core.node_parser import SentenceSplitter
 
 from .prompt_manager import PromptManager
 from .storage import LlamaVectorStore
@@ -96,7 +96,7 @@ class DocumentAnalyzer:
                 embed_batch_size=100  # Add batch size for embeddings
             )
             
-            self.text_splitter = RecursiveCharacterTextSplitter(
+            self.text_splitter = SentenceSplitter(
                 chunk_size=500,
                 chunk_overlap=20
             )
@@ -198,39 +198,38 @@ class DocumentAnalyzer:
             return None
 
     async def score_chunk_relevance(self, question: str, chunk_text: str) -> float:
-        """Score the relevance of a chunk to a question using LLM, following DIRAS methodology."""
+        """Score the relevance of a chunk to a question using LLM."""
         log_analysis_step(f"Computing relevance score for chunk: {chunk_text[:100]}...")
         
         messages = [
-            {"role": "system", "content": """You are an expert at evaluating text relevance for question answering systems.
-Your task is to score how relevant a given text chunk is for answering a specific question.
+            {"role": "system", "content": """You are a senior sustainability analyst with years of experience in evaluating corporate climate disclosures.
 
-Evaluate based on:
-1. Direct relevance to the question topic and requirements
-2. Presence of specific, factual information that helps answer the question
-3. Quality and usefulness of the context provided
-4. Completeness of information relative to what the question asks
+Your task is to evaluate text fragments for their usefulness in answering specific TCFD questions. You need to identify which pieces of text would be most valuable for a junior analyst to focus on.
 
-Output only a float score between 0.0 and 1.0 where:
-0.0 = Completely irrelevant or no useful information
-0.5 = Partially relevant or contains some useful context
-1.0 = Highly relevant with specific, direct information
+Score each text fragment from 0.0 to 1.0 where:
+0.0 = Not useful for answering the question (e.g., generic statements, unrelated content)
+0.3 = Contains relevant context but no specific evidence
+0.6 = Contains useful specific information but requires additional context
+1.0 = Contains critical evidence or specific details that directly answer the question
 
-Return only the numeric score, no explanation."""},
+Consider:
+- Specificity: Concrete data and commitments over general statements
+- Relevance: Direct connection to the question being asked
+- Evidence Quality: Quantitative data, specific policies, or clear processes
+- Decision Impact: How crucial this information is for making an assessment
+
+Output only the numeric score, no explanation."""},
             {"role": "user", "content": f"""Question: {question}
 
-Text chunk to evaluate:
+Text to evaluate:
 {chunk_text}
 
 Score (0.0-1.0):"""}
         ]
         
         try:
-            # Use our existing LLM instance
             result = await self.llm.ainvoke(messages)
-            # Extract float from response
             score = float(result.content.strip())
-            # Ensure score is between 0 and 1
             score = max(0.0, min(1.0, score))
             log_analysis_step(f"Computed relevance score: {score:.4f}")
             return score
@@ -239,79 +238,62 @@ Score (0.0-1.0):"""}
             return 0.0
 
     async def score_chunk_relevance_batch(self, question: str, chunks: List[Dict], single_call: bool = True) -> List[float]:
-        """Score the relevance of chunks to a question.
-        
-        Args:
-            question (str): The question to evaluate against
-            chunks (List[Dict]): List of chunks to evaluate
-            single_call (bool): If True (default), score all chunks in one LLM call.
-                              If False, process chunks in smaller batches.
-        """
-        log_analysis_step(f"Computing relevance scores for {len(chunks)} chunks...")
-        
-        if single_call:
-            # Process all chunks in a single LLM call
-            formatted_chunks = "\n\n".join([
-                f"Chunk {i+1}:\n{chunk['text']}"
+        """Score a batch of chunks using LLM."""
+        try:
+            # Format all chunks into a single prompt for batch scoring
+            chunks_text = "\n\n".join([
+                f"[CHUNK {i+1}]\n{chunk['text']}"
                 for i, chunk in enumerate(chunks)
             ])
             
             messages = [
-                {"role": "system", "content": """You are an expert at evaluating text relevance for question answering systems.
-Your task is to score how relevant each text chunk is for answering a specific question.
+                {"role": "system", "content": """You are a senior sustainability analyst evaluating text fragments for TCFD analysis.
 
-For each chunk, evaluate:
-1. Direct relevance to the question topic and requirements
-2. Presence of specific, factual information that helps answer the question
-3. Quality and usefulness of the context provided
+Your task is to score each text fragment's usefulness in answering a specific question. Consider:
+- Specificity: Concrete data and commitments over general statements
+- Relevance: Direct connection to the question being asked
+- Evidence Quality: Quantitative data, specific policies, or clear processes
+- Decision Impact: How crucial this information is for making an assessment
 
-Provide a float score between 0.0 and 1.0 where:
-0.0 = Completely irrelevant
-0.5 = Partially relevant
-1.0 = Highly relevant with specific information
+For each chunk marked [CHUNK X], provide a score from 0.0 to 1.0 where:
+0.0 = Not useful (generic/unrelated)
+0.3 = Contains relevant context but no specific evidence
+0.6 = Contains useful specific information but requires additional context
+1.0 = Contains critical evidence or specific details
 
-Return ONLY a JSON object with scores array, like:
-{
-    "scores": [0.8, 0.3, 0.9]  # one score per chunk in order
-}"""},
+Output only the scores in a JSON array, like: [0.8, 0.3, 0.0]"""},
                 {"role": "user", "content": f"""Question: {question}
 
-Text chunks to evaluate:
-{formatted_chunks}
+Text fragments to evaluate:
+{chunks_text}
 
-Return scores JSON:"""}
+Scores (JSON array):"""}
             ]
+
+            result = await self.llm.ainvoke(messages)
+            scores_text = result.content.strip()
             
-            try:
-                result = await self.llm.ainvoke(messages)
-                result_text = result.content.strip()
-                json_start = result_text.find('{')
-                json_end = result_text.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    result_text = result_text[json_start:json_end]
+            # Extract JSON array from response
+            start_idx = scores_text.find('[')
+            end_idx = scores_text.rfind(']') + 1
+            if start_idx >= 0 and end_idx > start_idx:
+                scores_text = scores_text[start_idx:end_idx]
+                scores = json.loads(scores_text)
                 
-                scores_json = json.loads(result_text)
-                scores = scores_json.get("scores", [0.0] * len(chunks))
+                # Validate scores
+                if not isinstance(scores, list) or len(scores) != len(chunks):
+                    raise ValueError(f"Invalid scores format: expected {len(chunks)} scores, got {len(scores) if isinstance(scores, list) else 'non-list'}")
                 
-                # Ensure scores are valid floats between 0 and 1
+                # Ensure all scores are floats in [0,1]
                 scores = [max(0.0, min(1.0, float(score))) for score in scores]
-                log_analysis_step(f"Processed all {len(chunks)} chunks in single call")
                 return scores
+            else:
+                raise ValueError("No valid JSON array found in response")
                 
-            except Exception as e:
-                log_analysis_step(f"Error scoring chunks: {str(e)}", "error")
-                return [0.0] * len(chunks)
-        else:
-            # Process in smaller batches (fallback mode)
-            BATCH_SIZE = 5
-            chunk_batches = [chunks[i:i + BATCH_SIZE] for i in range(0, len(chunks), BATCH_SIZE)]
-            all_scores = []
-            
-            for batch in chunk_batches:
-                batch_scores = await self._score_chunk_batch(question, batch)
-                all_scores.extend(batch_scores)
-            
-            return all_scores
+        except Exception as e:
+            log_analysis_step(f"Error in batch scoring: {str(e)}", "error")
+            # Return default scores on error
+            return [0.0] * len(chunks)
 
     async def process_document(self, file_path: str, question_ids: List[int], use_llm_scoring: bool = False, single_call: bool = True) -> AsyncGenerator[Dict, None]:
         """Process document and analyze TCFD questions.
@@ -342,9 +324,17 @@ Return scores JSON:"""}
             if chunks is None:
                 # If not in cache, load and process the document
                 log_analysis_step("Building new document chunks...")
-                loader = PyPDFLoader(str(file_path))
-                pages = loader.load()
-                chunks = self.text_splitter.split_documents(pages)
+                reader = PyMuPDFReader()
+                docs = reader.load(file_path=file_path)
+                # Convert the documents to text and create new Document objects
+                text_chunks = []
+                for doc in docs:
+                    nodes = self.text_splitter.split_text(doc.text)
+                    text_chunks.extend([
+                        Document(text=chunk, metadata=doc.metadata)
+                        for chunk in nodes
+                    ])
+                chunks = text_chunks
                 self._save_chunks_cache(cache_key, chunks)
             
             log_analysis_step(f"Using {len(chunks)} text chunks")
@@ -430,56 +420,97 @@ Return scores JSON:"""}
                     else:
                         log_analysis_step(f"Skipping LLM-based relevance scoring for question {q_id} (scoring is disabled)")
                     
-                    # Get LLM response
+                    # Sort chunks by computed_score
+                    if use_llm_scoring:
+                        chunks_data = sorted(
+                            chunks_data,
+                            key=lambda x: x.get('computed_score', 0.0),
+                            reverse=True  # Highest scores first
+                        )
+                        log_analysis_step(f"Sorted {len(chunks_data)} chunks by computed_score")
+                    else:
+                        # Sort by vector similarity score
+                        chunks_data = sorted(
+                            chunks_data,
+                            key=lambda x: x.get('relevance_score', 0.0),
+                            reverse=True  # Highest scores first
+                        )
+                        log_analysis_step(f"Sorted {len(chunks_data)} chunks by relevance_score")
+                    
+                    # Get LLM response with sorted chunks data
                     messages = self.prompt_manager.get_analysis_messages(
                         question=question_data['text'],
                         context=context,
-                        guidelines=question_data['guidelines']
+                        guidelines=question_data['guidelines'],
+                        chunks_data=chunks_data  # Now sorted by relevance
                     )
                     result = await self.llm.ainvoke(messages)
                     log_analysis_step(f"Got LLM response for question {q_id}", "debug")
                     
                     # Extract JSON from response
                     try:
-                        result_text = result.content
-                        json_start = result_text.rfind('{')
+                        result_text = result.content.strip()
+                        
+                        # Find the first { and last } to extract just the JSON object
+                        json_start = result_text.find('{')
                         json_end = result_text.rfind('}') + 1
+                        
                         if json_start >= 0 and json_end > json_start:
                             result_text = result_text[json_start:json_end]
-                        
-                        result_json = json.loads(result_text)
-                        
-                        # Ensure we have all required keys
-                        required_keys = ["ANSWER", "SCORE", "EVIDENCE", "GAPS", "SOURCES"]
-                        missing_keys = [key for key in required_keys if key not in result_json]
-                        if missing_keys:
-                            raise ValueError(f"Missing required keys in response: {missing_keys}")
-                        
-                        # Return the result in the exact format expected by display code
-                        yield {
-                            "question_number": q_id,
-                            "result": json.dumps({
+                            # Clean up any potential trailing commas
+                            result_text = result_text.replace(',}', '}')
+                            # Remove any potential markdown code block markers
+                            result_text = result_text.replace('```json', '').replace('```', '')
+                            
+                            log_analysis_step(f"Extracted JSON: {result_text[:100]}...")  # Log first 100 chars
+                            
+                            result_json = json.loads(result_text)
+                            
+                            # Ensure we have all required keys
+                            required_keys = ["ANSWER", "SCORE", "EVIDENCE", "GAPS", "SOURCES"]
+                            missing_keys = [key for key in required_keys if key not in result_json]
+                            if missing_keys:
+                                raise ValueError(f"Missing required keys in response: {missing_keys}")
+                            
+                            # Validate evidence format
+                            for evidence in result_json["EVIDENCE"]:
+                                if not isinstance(evidence, dict) or "text" not in evidence or "chunk" not in evidence:
+                                    raise ValueError("Evidence items must be dictionaries with 'text' and 'chunk' keys")
+                            
+                            # Update the result JSON structure
+                            # Convert chunks_data to be JSON serializable
+                            serializable_chunks = []
+                            for chunk in chunks_data:
+                                serializable_chunk = {
+                                    "text": chunk["text"],
+                                    "metadata": dict(chunk["metadata"]),  # Convert metadata to dict
+                                    "relevance_score": float(chunk["relevance_score"]),
+                                    "computed_score": float(chunk.get("computed_score", 0.0))
+                                }
+                                serializable_chunks.append(serializable_chunk)
+
+                            result_dict = {
                                 "ANSWER": result_json["ANSWER"],
                                 "SCORE": result_json["SCORE"],
                                 "EVIDENCE": result_json["EVIDENCE"],
                                 "GAPS": result_json["GAPS"],
                                 "SOURCES": result_json["SOURCES"],
-                                "CHUNKS": chunks_data  # Add chunks to the response
-                            })
-                        }
-                        
+                                "CHUNKS": serializable_chunks
+                            }
+
+                            yield {
+                                "question_number": q_id,
+                                "result": json.dumps(result_dict)  # Convert to JSON string before yielding
+                            }
+                        else:
+                            raise ValueError("No valid JSON object found in response")
+                            
+                    except json.JSONDecodeError as e:
+                        log_analysis_step(f"JSON decode error: {str(e)}\nResponse text: {result_text[:200]}", "error")
+                        raise
                     except Exception as e:
-                        log_analysis_step(f"Error processing result for question {q_id}: {str(e)}", "error")
-                        yield {
-                            "question_number": q_id,
-                            "result": json.dumps({
-                                "ANSWER": "Error processing analysis response",
-                                "SCORE": 0,
-                                "EVIDENCE": [],
-                                "GAPS": ["Error processing response"],
-                                "SOURCES": []
-                            })
-                        }
+                        log_analysis_step(f"Error processing result: {str(e)}", "error")
+                        raise
                 except Exception as e:
                     error_msg = f"Error processing question {q_id}: {str(e)}"
                     log_analysis_step(error_msg, "error")
