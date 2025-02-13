@@ -18,6 +18,8 @@ from langchain.prompts import PromptTemplate
 from langchain.chains.summarize import load_summarize_chain
 from llama_index.readers.file import PyMuPDFReader
 from llama_index.core.node_parser import SentenceSplitter
+from llama_index.llms.openai import OpenAI
+from llama_index.core.ingestion import IngestionCache
 
 from .prompt_manager import PromptManager
 from .storage import LlamaVectorStore
@@ -72,20 +74,26 @@ class DocumentAnalyzer:
         # Use absolute paths for storage, relative to project root
         self.storage_path = Path(__file__).parent.parent.parent / "storage"
         self.cache_path = self.storage_path / "cache"
+        self.llm_cache_path = self.storage_path / "llm_cache"
+        
+        # Create cache directories
         self.cache_path.mkdir(parents=True, exist_ok=True)
+        self.llm_cache_path.mkdir(parents=True, exist_ok=True)
         
         log_analysis_step(f"Storage path: {self.storage_path.resolve()}", "debug")
         log_analysis_step(f"Cache path: {self.cache_path.resolve()}", "debug")
+        log_analysis_step(f"LLM cache path: {self.llm_cache_path.resolve()}", "debug")
         
         model_name = os.getenv("OPENAI_API_MODEL", "gpt-4-turbo-preview")
         log_analysis_step(f"Using model: {model_name}")
         
         try:
-            self.llm = ChatOpenAI(
-                temperature=0,
+            # Initialize LLM with caching
+            self.llm = OpenAI(
                 model=model_name,
                 api_key=os.getenv("OPENAI_API_KEY"),
-                organization=os.getenv("OPENAI_ORGANIZATION")
+                api_base=os.getenv("OPENAI_API_BASE"),
+                cache_dir=str(self.llm_cache_path),
             )
             
             # Configure embeddings globally for LlamaIndex
@@ -93,7 +101,14 @@ class DocumentAnalyzer:
                 api_key=os.getenv('OPENAI_API_KEY'),
                 api_base=os.getenv('OPENAI_API_BASE'),
                 model_name=os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-ada-002'),
-                embed_batch_size=100  # Add batch size for embeddings
+                embed_batch_size=100
+            )
+            
+            # Initialize caching
+            self.use_cache = True  # Default to True, can be overridden
+            Settings.ingestion_cache = IngestionCache(
+                cache_dir=str(self.llm_cache_path),
+                cache_type="local"
             )
             
             self.text_splitter = SentenceSplitter(
@@ -108,8 +123,8 @@ class DocumentAnalyzer:
             }
             
             self.embedding_params = {
-                "model": "text-embedding-ada-002",  # Default OpenAI embedding model
-                "batch_size": 100  # Add batch size to parameters
+                "model": "text-embedding-ada-002",
+                "batch_size": 100
             }
             
         except Exception as e:
@@ -200,40 +215,58 @@ class DocumentAnalyzer:
 
     async def score_chunk_relevance(self, question: str, chunk_text: str) -> float:
         """Score the relevance of a chunk to a question using LLM."""
+        if not self.use_cache:
+            Settings.ingestion_cache = None
+            
         log_analysis_step(f"Computing relevance score for chunk: {chunk_text[:100]}...")
         
-        messages = [
-            {"role": "system", "content": """You are a senior sustainability analyst with years of experience in evaluating corporate climate disclosures.
+        try:
+            response = await self.llm.acomplete(prompt=f"""As a senior equity analyst with expertise in climate science evaluating a company's sustainability report, you are tasked with evaluating text fragments for their usefulness in answering specific TCFD questions.
 
-Your task is to evaluate text fragments for their usefulness in answering specific TCFD questions. You need to identify which pieces of text would be most valuable for a junior analyst to focus on.
+Your task is to score the relevance and quality of evidence in each text fragment. Consider:
 
-Score each text fragment from 0.0 to 1.0 where:
-0.0 = Not useful for answering the question (e.g., generic statements, unrelated content)
+1. Specificity and Concreteness:
+   - Quantitative data and specific metrics (highest value)
+   - Concrete policies and procedures
+   - Specific commitments with timelines
+   - General statements or vague claims (lowest value)
+
+2. Evidence Quality:
+   - Verifiable data and third-party verification
+   - Clear methodologies and frameworks
+   - Specific examples and case studies
+   - Unsubstantiated claims (lowest value)
+
+3. Direct Relevance:
+   - Direct answers to the question components
+   - Related but indirect information
+   - Contextual background
+   - Unrelated information (lowest value)
+
+4. Disclosure Quality:
+   - Comprehensive and transparent disclosure
+   - Balanced reporting (both positive and negative)
+   - Clear acknowledgment of limitations
+   - Potential greenwashing or selective disclosure (lowest value)
+
+Score from 0.0 to 1.0 where:
+0.0 = Not useful (generic statements, unrelated content)
 0.3 = Contains relevant context but no specific evidence
 0.6 = Contains useful specific information but requires additional context
 1.0 = Contains critical evidence or specific details that directly answer the question
 
-Consider:
-- Specificity: Concrete data and commitments over general statements
-- Relevance: Direct connection to the question being asked
-- Evidence Quality: Quantitative data, specific policies, or clear processes
-- Decision Impact: How crucial this information is for making an assessment
-
-Output only the numeric score, no explanation."""},
-            {"role": "user", "content": f"""Question: {question}
+Question: {question}
 
 Text to evaluate:
 {chunk_text}
 
-Score (0.0-1.0):"""}
-        ]
-        
-        try:
-            result = await self.llm.ainvoke(messages)
-            score = float(result.content.strip())
+Output only the numeric score (0.0-1.0):""")
+            
+            score = float(response.text.strip())
             score = max(0.0, min(1.0, score))
             log_analysis_step(f"Computed relevance score: {score:.4f}")
             return score
+            
         except Exception as e:
             log_analysis_step(f"Error scoring chunk relevance: {str(e)}", "error")
             return 0.0
@@ -247,32 +280,48 @@ Score (0.0-1.0):"""}
                 for i, chunk in enumerate(chunks)
             ])
             
-            messages = [
-                {"role": "system", "content": """You are a senior sustainability analyst evaluating text fragments for TCFD analysis.
+            response = await self.llm.acomplete(prompt=f"""As a senior equity analyst with expertise in climate science evaluating a company's sustainability report, you are tasked with evaluating text fragments for their usefulness in answering specific TCFD questions.
 
-Your task is to score each text fragment's usefulness in answering a specific question. Consider:
-- Specificity: Concrete data and commitments over general statements
-- Relevance: Direct connection to the question being asked
-- Evidence Quality: Quantitative data, specific policies, or clear processes
-- Decision Impact: How crucial this information is for making an assessment
+Your task is to score the relevance and quality of evidence in each text fragment. Consider:
+
+1. Specificity and Concreteness:
+   - Quantitative data and specific metrics (highest value)
+   - Concrete policies and procedures
+   - Specific commitments with timelines
+   - General statements or vague claims (lowest value)
+
+2. Evidence Quality:
+   - Verifiable data and third-party verification
+   - Clear methodologies and frameworks
+   - Specific examples and case studies
+   - Unsubstantiated claims (lowest value)
+
+3. Direct Relevance:
+   - Direct answers to the question components
+   - Related but indirect information
+   - Contextual background
+   - Unrelated information (lowest value)
+
+4. Disclosure Quality:
+   - Comprehensive and transparent disclosure
+   - Balanced reporting (both positive and negative)
+   - Clear acknowledgment of limitations
+   - Potential greenwashing or selective disclosure (lowest value)
 
 For each chunk marked [CHUNK X], provide a score from 0.0 to 1.0 where:
-0.0 = Not useful (generic/unrelated)
+0.0 = Not useful (generic statements, unrelated content)
 0.3 = Contains relevant context but no specific evidence
 0.6 = Contains useful specific information but requires additional context
-1.0 = Contains critical evidence or specific details
+1.0 = Contains critical evidence or specific details that directly answer the question
 
-Output only the scores in a JSON array, like: [0.8, 0.3, 0.0]"""},
-                {"role": "user", "content": f"""Question: {question}
+Question: {question}
 
 Text fragments to evaluate:
 {chunks_text}
 
-Scores (JSON array):"""}
-            ]
+Output only the scores in a JSON array, like: [0.8, 0.3, 0.0]""")
 
-            result = await self.llm.ainvoke(messages)
-            scores_text = result.content.strip()
+            scores_text = response.text.strip()
             
             # Extract JSON array from response
             start_idx = scores_text.find('[')
@@ -445,12 +494,19 @@ Scores (JSON array):"""}
                         guidelines=question_data['guidelines'],
                         chunks_data=chunks_data  # Now sorted by relevance
                     )
-                    result = await self.llm.ainvoke(messages)
+                    
+                    # Convert messages to a single prompt for LlamaIndex OpenAI
+                    prompt = "\n\n".join([
+                        f"{msg['role'].upper()}: {msg['content']}"
+                        for msg in messages
+                    ])
+                    
+                    result = await self.llm.acomplete(prompt=prompt)
                     log_analysis_step(f"Got LLM response for question {q_id}", "debug")
                     
                     # Extract JSON from response
                     try:
-                        result_text = result.content.strip()
+                        result_text = result.text.strip()
                         
                         # Find the first { and last } to extract just the JSON object
                         json_start = result_text.find('{')
