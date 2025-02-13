@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 from dotenv import load_dotenv
 import traceback
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -40,6 +41,7 @@ logger.info(f"Added {current_dir} to Python path")
 
 from core.analyzer import DocumentAnalyzer
 from core.prompt_manager import PromptManager
+from core.dataframe_manager import create_analysis_dataframes, create_combined_dataframe
 
 # Load environment variables
 load_dotenv()
@@ -128,71 +130,82 @@ def save_uploaded_file(uploaded_file) -> Optional[str]:
         st.error(f"Error saving file: {str(e)}")
         return None
 
-def display_results(results: Dict[str, Any], questions: Dict[str, Dict], question_id: int):
-    try:
-        result_json = results  # Use the dictionary directly
-        
-        # Convert score to float/int if it's a string
-        score = result_json.get("SCORE", 0)
-        if isinstance(score, str):
-            try:
-                score = float(score)
-            except ValueError:
-                score = 0
-        
-        # Display score with color based on value
-        score_color = "#ff0000" if score < 5 else "#00ff00"
-        st.markdown(f"""
-            ##### Score: <span style='color: {score_color}'>{score}/10</span>
-        """, unsafe_allow_html=True)
-        
-        # Display answer
-        st.markdown("##### Analysis")
-        st.write(result_json.get("ANSWER", "No answer provided"))
-        
-        # Display evidence
-        evidence = result_json.get("EVIDENCE", [])
-        if evidence:
-            st.markdown("##### Key Evidence")
-            for e in evidence:
-                if isinstance(e, dict):
-                    chunk_num = e.get('chunk', 'Unknown')
-                    evidence_text = e.get('text', '')
-                    st.markdown(f"""
-                        <div style='margin-bottom: 0.5rem;'>
-                            <span style='color: #4CAF50'>✓</span> {evidence_text}
-                            <span style='color: #666; font-size: 0.8em'>[From Chunk {chunk_num}]</span>
-                        </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f"✓ {e}")
-        
-        # Display gaps
-        gaps = result_json.get("GAPS", [])
-        if gaps:
-            st.markdown("##### Areas for Improvement")
-            for gap in gaps:
-                st.markdown(f"○ {gap}")
-        
-        # Display sources
-        sources = result_json.get("SOURCES", [])
-        if sources:
-            st.markdown("##### Referenced Sources")
-            st.write(", ".join(f"Source {s}" for s in sources))
-            
-    except json.JSONDecodeError as e:
-        st.error(f"Error parsing results: {str(e)}")
-    except Exception as e:
-        st.error(f"Error displaying results: {str(e)}")
+def display_dataframes(analysis_df: pd.DataFrame, chunks_df: pd.DataFrame):
+    """Display only the dataframes without download buttons"""
+    # Main Analysis Table (only once)
+    st.subheader("Analysis Results")
+    st.dataframe(
+        analysis_df,
+        use_container_width=True,
+        column_config={
+            "Score": st.column_config.NumberColumn(
+                "Score",
+                help="Analysis score out of 10",
+                min_value=0,
+                max_value=10,
+                format="%.1f"
+            ),
+            "Analysis": st.column_config.TextColumn(
+                "Analysis",
+                width="large"
+            ),
+            "Key Evidence": st.column_config.TextColumn(
+                "Key Evidence",
+                width="medium"
+            )
+        }
+    )
+    
+    # Document Chunks Table (only once)
+    st.subheader("Document Chunks")
+    st.dataframe(
+        chunks_df,
+        use_container_width=True,
+        column_config={
+            "Vector Similarity": st.column_config.NumberColumn(
+                "Vector Similarity",
+                format="%.3f"
+            ),
+            "LLM Score": st.column_config.NumberColumn(
+                "LLM Score",
+                format="%.3f"
+            ),
+            "Chunk Text": st.column_config.TextColumn(
+                "Chunk Text",
+                width="large"
+            )
+        }
+    )
+
+def display_download_buttons(analysis_df: pd.DataFrame, chunks_df: pd.DataFrame):
+    """Display download buttons in a separate section"""
+    st.subheader("Export Data")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.download_button(
+            "Download Complete Analysis",
+            data=analysis_df.to_csv(index=False).encode('utf-8'),
+            file_name="complete_analysis.csv",
+            mime="text/csv",
+            key='download_analysis'
+        )
+    
+    with col2:
+        st.download_button(
+            "Download All Chunks",
+            data=chunks_df.to_csv(index=False).encode('utf-8'),
+            file_name="all_chunks.csv",
+            mime="text/csv",
+            key='download_chunks'
+        )
 
 async def analyze_document_and_display(analyzer, file_path: str, questions: Dict, selected_questions: List[str], use_llm_scoring: bool = False, single_call: bool = True):
     """Analyze document and display results as they come in"""
     try:
-        results = {"answers": {}}  # Initialize results structure
-        results_placeholder = st.empty()
-        results_container = st.container()
+        results = {"answers": {}}
+        status_placeholder = st.empty()
         
-        # Use the async generator directly
         async for result in analyzer.analyze_document(file_path, questions, selected_questions, use_llm_scoring, single_call):
             if "error" in result:
                 log_analysis_step(f"Error received from analyzer: {result['error']}", "error")
@@ -201,108 +214,91 @@ async def analyze_document_and_display(analyzer, file_path: str, questions: Dict
             
             if "status" in result:
                 log_analysis_step(f"Status update: {result['status']}", "debug")
-                results_placeholder.write(result["status"])
+                status_placeholder.write(result["status"])
                 continue
-            
+                
             try:
-                # Process the result
-                question_id = result.get('question_id')  # Expect full question ID from analyzer
+                question_id = result.get('question_id')
                 if question_id is None:
-                    log_analysis_step("Missing question ID in result", "error")
-                    continue
-                
-                log_analysis_step(f"Processing result for question {question_id}")
-                
-                # Store raw response for debugging
-                if not hasattr(st.session_state, 'raw_responses'):
-                    st.session_state.raw_responses = {}
-                st.session_state.raw_responses[question_id] = result["result"]
-                
-                # Parse the result - it's already in the correct format from the analyzer
-                try:
-                    result_json = json.loads(result["result"])
-                except json.JSONDecodeError as e:
-                    log_analysis_step(f"Failed to parse JSON for {question_id}: {str(e)}", "error")
                     continue
                 
                 # Store results
-                results["answers"][question_id] = result_json
+                results["answers"][question_id] = result
                 
-                # Display the updated results immediately
-                with results_container:
-                    st.empty()  # Clear previous content
-                    for display_id in results["answers"]:
-                        display_results(results["answers"][display_id], questions, display_id)
+                # Create DataFrames from results
+                analysis_df, chunks_df = create_analysis_dataframes(
+                    results["answers"], 
+                    Path(file_path).name
+                )
+                
+                # Store in session state for display
+                st.session_state.analysis_df = analysis_df
+                st.session_state.chunks_df = chunks_df
                         
-                        # Display chunks in a dataframe if available
-                        result_data = results["answers"][display_id]
-                        if "CHUNKS" in result_data:
-                            log_analysis_step(f"Processing chunks data for display (question {display_id})")
-                            st.subheader(f"Retrieved Context Chunks for Question {display_id}")
-                            chunks_df = pd.DataFrame(result_data["CHUNKS"])
-                            
-                            if not chunks_df.empty:
-                                log_analysis_step(f"Found {len(chunks_df)} chunks to display")
-                                
-                                # Check for computed scores
-                                has_computed_scores = "computed_score" in chunks_df.columns
-                                log_analysis_step(f"Computed scores present: {has_computed_scores}")
-                                
-                                # Clean up the display by selecting relevant columns
-                                columns = ["text", "metadata", "relevance_score"]
-                                if has_computed_scores:
-                                    columns.append("computed_score")
-                                    log_analysis_step("Including computed scores in display")
-                                display_df = chunks_df[columns].copy()
-                                
-                                # Convert metadata dict to string for better display
-                                display_df["metadata"] = display_df["metadata"].apply(lambda x: json.dumps(x, indent=2))
-                                
-                                # Format scores
-                                display_df["relevance_score"] = display_df["relevance_score"].apply(lambda x: f"{x:.4f}")
-                                if has_computed_scores:
-                                    display_df["computed_score"] = display_df["computed_score"].apply(lambda x: f"{x:.4f}")
-                                    # Sort by computed score if available
-                                    display_df = display_df.sort_values("computed_score", ascending=False)
-                                    log_analysis_step("Sorted chunks by computed score")
-                                else:
-                                    # Sort by vector similarity score
-                                    display_df = display_df.sort_values("relevance_score", ascending=False)
-                                    log_analysis_step("Sorted chunks by vector similarity")
-                                
-                                # Rename columns for better display
-                                display_df = display_df.rename(columns={
-                                    "relevance_score": "Vector Similarity",
-                                    "computed_score": "LLM Computed Score",
-                                    "text": "Content",
-                                    "metadata": "Metadata"
-                                })
-                                
-                                log_analysis_step(f"Displaying dataframe with columns: {display_df.columns.tolist()}")
-                                st.dataframe(display_df, use_container_width=True)
-                            else:
-                                log_analysis_step("Warning: Empty chunks dataframe", "warning")
-            
             except Exception as e:
                 log_analysis_step(f"Unexpected error processing result: {str(e)}", "error")
                 log_analysis_step(traceback.format_exc(), "error")
                 st.error(f"Error processing result: {str(e)}")
                 continue
         
-        # Log final results summary
-        log_analysis_step(f"Analysis complete. Processed {len(results['answers'])} questions successfully")
-        
         # Store final results in session state
         st.session_state.results = results
         st.session_state.analysis_complete = True
         
         # Clear the status placeholder
-        results_placeholder.empty()
+        status_placeholder.empty()
         
     except Exception as e:
         log_analysis_step(f"Critical error during analysis: {str(e)}", "error")
         log_analysis_step(traceback.format_exc(), "error")
         st.error(f"Error during analysis: {str(e)}")
+
+def display_final_results(analysis_df: pd.DataFrame, chunks_df: pd.DataFrame):
+    """Display the final results including both tables"""
+    # Analysis Results
+    st.subheader("Analysis Results")
+    st.dataframe(
+        analysis_df,
+        use_container_width=True,
+        column_config={
+            "Score": st.column_config.NumberColumn(
+                "Score",
+                help="Analysis score out of 10",
+                min_value=0,
+                max_value=10,
+                format="%.1f"
+            ),
+            "Analysis": st.column_config.TextColumn(
+                "Analysis",
+                width="large"
+            ),
+            "Key Evidence": st.column_config.TextColumn(
+                "Key Evidence",
+                width="medium"
+            )
+        }
+    )
+    
+    # Document Chunks
+    st.subheader("Document Chunks")
+    st.dataframe(
+        chunks_df,
+        use_container_width=True,
+        column_config={
+            "Vector Similarity": st.column_config.NumberColumn(
+                "Vector Similarity",
+                format="%.3f"
+            ),
+            "LLM Score": st.column_config.NumberColumn(
+                "LLM Score",
+                format="%.3f"
+            ),
+            "Chunk Text": st.column_config.TextColumn(
+                "Chunk Text",
+                width="large"
+            )
+        }
+    )
 
 def main():
     st.set_page_config(
@@ -311,6 +307,14 @@ def main():
         layout="wide"
     )
     
+    # Initialize session state variables if they don't exist
+    if 'analysis_complete' not in st.session_state:
+        st.session_state.analysis_complete = False
+    if 'selected_questions' not in st.session_state:
+        st.session_state.selected_questions = []
+    if 'analysis_triggered' not in st.session_state:
+        st.session_state.analysis_triggered = False
+    
     st.title("Report Analyzer")
     st.write("Upload a PDF report and select questions for sustainability report analysis.")
     
@@ -318,86 +322,114 @@ def main():
         # Initialize analyzer
         analyzer = ReportAnalyzer()
         
-        # Question set selection
-        question_sets = {
-            "tcfd": "TCFD (Task Force on Climate-related Financial Disclosures)",
-            "s4m": "S4M (Score4More)"
-        }
+        # Advanced options in expander
+        with st.expander("Advanced Options"):
+            # Use session state to persist advanced options
+            if 'use_llm_scoring' not in st.session_state:
+                st.session_state.use_llm_scoring = False
+            if 'single_call' not in st.session_state:
+                st.session_state.single_call = True
+            if 'use_cache' not in st.session_state:
+                st.session_state.use_cache = True
+                
+            st.session_state.use_llm_scoring = st.checkbox(
+                "Use LLM for relevance scoring",
+                value=st.session_state.use_llm_scoring
+            )
+            
+            if st.session_state.use_llm_scoring:
+                st.session_state.single_call = st.checkbox(
+                    "Score all chunks in single LLM call",
+                    value=st.session_state.single_call,
+                    help="More efficient but may be less accurate with large numbers of chunks"
+                )
+            
+            st.session_state.use_cache = st.checkbox(
+                "Use LLM Cache",
+                value=st.session_state.use_cache,
+                help="Cache LLM responses to improve performance for repeated queries"
+            )
+            
+            # Cache clear button
+            if st.button("Clear Cache"):
+                if hasattr(st.session_state, 'llm_cache'):
+                    del st.session_state.llm_cache
+                st.success("Cache cleared!")
         
-        # Use session state to track the selected question set
+        # Question set selection using session state
         if 'current_question_set' not in st.session_state:
             st.session_state.current_question_set = "tcfd"
             
-        selected_set = st.selectbox(
-            "Select Question Set",
-            options=list(question_sets.keys()),
-            format_func=lambda x: question_sets[x],
-            key="question_set",
-            on_change=lambda: setattr(st.session_state, 'current_question_set', st.session_state.question_set)
-        )
-        
-        # Load the selected question set
-        question_set_data = analyzer.load_question_set(selected_set)
-        questions = question_set_data["questions"]
-        
-        if question_set_data["description"]:
-            st.write(question_set_data["description"])
-        
-        # File upload
+        # File upload handling with session state
+        if 'uploaded_file' not in st.session_state:
+            st.session_state.uploaded_file = None
+            
         uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+        if uploaded_file is not None:
+            st.session_state.uploaded_file = uploaded_file
         
-        if uploaded_file:
+        if st.session_state.uploaded_file:
             try:
-                logger.info(f"File uploaded: {uploaded_file.name}")
-                st.write("File uploaded successfully!")
+                # Load questions and handle selection
+                question_set_data = analyzer.load_question_set(st.session_state.current_question_set)
+                questions = question_set_data["questions"]
                 
-                # Display available questions
-                if not questions:
-                    questions_path = Path(__file__).parent / "questionsets" / f"{selected_set}_questions.yaml"
-                    st.error(f"No questions loaded. Please check if the questions file exists at: {questions_path}")
-                    return
-                    
+                if question_set_data["description"]:
+                    st.write(question_set_data["description"])
+                
+                # Question selection with session state
                 st.subheader("Select Questions for Analysis")
                 selected_questions = []
                 for q_id, q_data in questions.items():
-                    # Use the question ID directly as the checkbox key
-                    if st.checkbox(q_data['text'], key=q_id):
-                        selected_questions.append(q_id)  # Use the full question ID
+                    if st.checkbox(
+                        q_data['text'],
+                        key=f"question_{q_id}",
+                        value=q_id in st.session_state.selected_questions
+                    ):
+                        selected_questions.append(q_id)
+                st.session_state.selected_questions = selected_questions
                 
-                # Add configuration options
-                with st.expander("Advanced Options"):
-                    use_llm_scoring = st.checkbox("Use LLM for relevance scoring", value=False)
-                    if use_llm_scoring:
-                        single_call = st.checkbox(
-                            "Score all chunks in single LLM call", 
-                            value=True,
-                            help="More efficient but may be less accurate with large numbers of chunks"
-                        )
-                    else:
-                        single_call = True
+                # Create a single results container
+                results_container = st.container()
                 
-                if st.button("Analyze Document"):
-                    with st.spinner("Analyzing document..."):
-                        # Save uploaded file
-                        file_path = save_uploaded_file(uploaded_file)
-                        if not file_path:
-                            return
+                # Analysis trigger with session state control
+                if st.button("Analyze Document") or st.session_state.analysis_triggered:
+                    st.session_state.analysis_triggered = True
+                    
+                    if not st.session_state.analysis_complete:
+                        with st.spinner("Analyzing document..."):
+                            file_path = save_uploaded_file(st.session_state.uploaded_file)
+                            if file_path:
+                                asyncio.run(analyze_document_and_display(
+                                    analyzer,
+                                    file_path,
+                                    questions,
+                                    st.session_state.selected_questions,
+                                    st.session_state.use_llm_scoring,
+                                    st.session_state.single_call
+                                ))
+                
+                # Display results if available
+                if hasattr(st.session_state, 'analysis_df'):
+                    with results_container:
+                        display_final_results(st.session_state.analysis_df, st.session_state.chunks_df)
                         
-                        log_analysis_step(f"Starting analysis with question set: {selected_set}")
-                        log_analysis_step(f"Selected questions: {selected_questions}")
-                        log_analysis_step(f"LLM scoring enabled: {use_llm_scoring}")
-                        
-                        # Run analysis using the selected questions
-                        asyncio.run(analyze_document_and_display(
-                            analyzer, 
-                            file_path,
-                            questions,  # Pass the full questions dictionary
-                            selected_questions,
-                            use_llm_scoring,
-                            single_call
-                        ))
+                        if st.session_state.analysis_complete:
+                            display_download_buttons(st.session_state.analysis_df, st.session_state.chunks_df)
+                            
+                            if st.button("Clear Results", key="clear_results_button"):
+                                st.session_state.analysis_complete = False
+                                st.session_state.analysis_triggered = False
+                                st.session_state.selected_questions = []
+                                if hasattr(st.session_state, 'analysis_df'):
+                                    del st.session_state.analysis_df
+                                if hasattr(st.session_state, 'chunks_df'):
+                                    del st.session_state.chunks_df
+                                st.experimental_rerun()
+
             except Exception as e:
                 st.error(f"Error processing uploaded file: {str(e)}")
+                
     except Exception as e:
         st.error(f"Error initializing analyzer: {str(e)}")
 
