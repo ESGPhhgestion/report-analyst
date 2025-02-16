@@ -90,7 +90,7 @@ class ReportAnalyzer:
                 "description": ""
             }
     
-    async def analyze_document(self, file_path: str, questions: Dict, selected_questions: List[str], use_llm_scoring: bool = False, single_call: bool = True) -> AsyncGenerator[Dict, None]:
+    async def analyze_document(self, file_path: str, questions: Dict, selected_questions: List[str], use_llm_scoring: bool = False, single_call: bool = True, force_recompute: bool = False) -> AsyncGenerator[Dict, None]:
         """Analyze a document using the provided questions"""
         try:
             log_analysis_step(f"Starting analysis of document: {file_path}")
@@ -105,10 +105,16 @@ class ReportAnalyzer:
             
             # Get the question set prefix from the first selected question
             question_set = selected_questions[0].split('_')[0] if selected_questions else "tcfd"
-            self.analyzer.question_set_prefix = question_set
+            self.analyzer.question_set = question_set
             
             # Pass use_llm_scoring to process_document
-            async for result in self.analyzer.process_document(file_path, selected_numbers, use_llm_scoring, single_call):
+            async for result in self.analyzer.process_document(
+                file_path, 
+                selected_numbers, 
+                use_llm_scoring, 
+                single_call,
+                force_recompute
+            ):
                 # Convert question number back to ID if needed
                 if 'question_number' in result:
                     result['question_id'] = f"{question_set}_{result['question_number']}"
@@ -211,13 +217,22 @@ def display_download_buttons(analysis_df: pd.DataFrame, chunks_df: pd.DataFrame)
             key='download_chunks'
         )
 
-async def analyze_document_and_display(analyzer, file_path: str, questions: Dict, selected_questions: List[str], use_llm_scoring: bool = False, single_call: bool = True):
+async def analyze_document_and_display(analyzer, file_path: str, questions: Dict, selected_questions: List[str], use_llm_scoring: bool = False, single_call: bool = True, force_recompute: bool = False):
     """Analyze document and display results as they come in"""
     try:
-        results = {"answers": {}}
+        if 'results' not in st.session_state:
+            st.session_state.results = {"answers": {}}
+        
         status_placeholder = st.empty()
         
-        async for result in analyzer.analyze_document(file_path, questions, selected_questions, use_llm_scoring, single_call):
+        async for result in analyzer.analyze_document(
+            file_path, 
+            questions,
+            selected_questions,
+            use_llm_scoring, 
+            single_call,
+            force_recompute
+        ):
             if "error" in result:
                 log_analysis_step(f"Error received from analyzer: {result['error']}", "error")
                 st.error(f"Analysis error: {result['error']}")
@@ -234,17 +249,26 @@ async def analyze_document_and_display(analyzer, file_path: str, questions: Dict
                     continue
                 
                 # Store results
-                results["answers"][question_id] = result
+                st.session_state.results["answers"][question_id] = result
                 
-                # Create DataFrames from results
-                analysis_df, chunks_df = create_analysis_dataframes(
-                    results["answers"], 
-                    Path(file_path).name
-                )
-                
-                # Store in session state for display
-                st.session_state.analysis_df = analysis_df
-                st.session_state.chunks_df = chunks_df
+                # Create DataFrames from results only if we have new data
+                if not hasattr(st.session_state, 'analysis_df') or question_id not in st.session_state.get('processed_questions', set()):
+                    analysis_df, chunks_df = create_analysis_dataframes(
+                        st.session_state.results["answers"], 
+                        Path(file_path).name
+                    )
+                    
+                    # Store in session state
+                    st.session_state.analysis_df = analysis_df
+                    st.session_state.chunks_df = chunks_df
+                    
+                    # Track which questions we've processed
+                    if 'processed_questions' not in st.session_state:
+                        st.session_state.processed_questions = set()
+                    st.session_state.processed_questions.add(question_id)
+                    
+                    # Use st.rerun instead of experimental_rerun
+                    st.rerun()
                         
             except Exception as e:
                 log_analysis_step(f"Unexpected error processing result: {str(e)}", "error")
@@ -252,8 +276,7 @@ async def analyze_document_and_display(analyzer, file_path: str, questions: Dict
                 st.error(f"Error processing result: {str(e)}")
                 continue
         
-        # Store final results in session state
-        st.session_state.results = results
+        # Mark analysis as complete
         st.session_state.analysis_complete = True
         
         # Clear the status placeholder
@@ -452,6 +475,116 @@ def get_uploaded_files_history() -> List[Dict]:
     # Sort by most recent first
     return sorted(files, key=lambda x: x['date'], reverse=True)
 
+def get_all_cached_answers(question_set: str) -> Dict:
+    """Get all cached answers for a given question set"""
+    # Use relative path from where the app is run
+    cache_path = Path("storage/cache")
+    
+    if not cache_path.exists():
+        log_analysis_step(f"Cache directory not found: {cache_path}")
+        return {}
+        
+    log_analysis_step(f"Looking for cached answers in: {cache_path}")
+    all_answers = {}
+    
+    # Look for all cache files for this question set
+    pattern = f"*_{question_set}_answers.json"
+    log_analysis_step(f"Searching for files matching: {pattern}")
+    
+    for cache_file in cache_path.glob(pattern):
+        try:
+            log_analysis_step(f"Found cache file: {cache_file}")
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                answers = json.load(f)
+                # Extract report name from filename (first part before underscore)
+                report_name = cache_file.stem.split('_')[0]
+                all_answers[report_name] = answers
+                log_analysis_step(f"Loaded {len(answers)} answers for {report_name}")
+        except Exception as e:
+            log_analysis_step(f"Error loading cache file {cache_file}: {str(e)}", "warning")
+    
+    if not all_answers:
+        log_analysis_step(f"No cached answers found for question set {question_set}")
+    else:
+        log_analysis_step(f"Found cached answers for {len(all_answers)} reports")
+    
+    return all_answers
+
+def create_coverage_matrix(question_set: str) -> pd.DataFrame:
+    """Create a matrix showing which reports have answers for which questions"""
+    all_answers = get_all_cached_answers(question_set)
+    
+    # Get all unique question IDs
+    all_questions = set()
+    for answers in all_answers.values():
+        all_questions.update(answers.keys())
+    
+    # Create matrix
+    matrix_data = []
+    for report_name, answers in all_answers.items():
+        row = {'Report': report_name}
+        for q_id in sorted(all_questions):
+            row[q_id] = '✓' if q_id in answers else ''
+        matrix_data.append(row)
+    
+    return pd.DataFrame(matrix_data)
+
+def display_consolidated_results(question_set: str):
+    """Display consolidated results for all reports in a question set"""
+    all_answers = get_all_cached_answers(question_set)
+    
+    if not all_answers:
+        st.warning(f"No cached answers found for question set {question_set}")
+        return
+        
+    # Create consolidated DataFrames
+    all_analysis = []
+    all_chunks = []
+    
+    for report_name, answers in all_answers.items():
+        analysis_df, chunks_df = create_analysis_dataframes(answers, report_name)
+        all_analysis.append(analysis_df)
+        all_chunks.append(chunks_df)
+    
+    consolidated_analysis = pd.concat(all_analysis, ignore_index=True)
+    consolidated_chunks = pd.concat(all_chunks, ignore_index=True)
+    
+    # Display coverage matrix
+    st.subheader("Analysis Coverage")
+    coverage_matrix = create_coverage_matrix(question_set)
+    st.dataframe(coverage_matrix, use_container_width=True)
+    
+    # Display consolidated results
+    st.subheader("All Analysis Results")
+    st.dataframe(consolidated_analysis, use_container_width=True)
+    
+    st.subheader("All Document Chunks")
+    st.dataframe(consolidated_chunks, use_container_width=True)
+    
+    # Add download buttons
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.download_button(
+            "Download Coverage Matrix (CSV)",
+            coverage_matrix.to_csv(index=False),
+            f"{question_set}_coverage_matrix.csv",
+            "text/csv"
+        )
+    with col2:
+        st.download_button(
+            "Download All Analysis (CSV)",
+            consolidated_analysis.to_csv(index=False),
+            f"{question_set}_all_analysis.csv",
+            "text/csv"
+        )
+    with col3:
+        st.download_button(
+            "Download All Chunks (CSV)",
+            consolidated_chunks.to_csv(index=False),
+            f"{question_set}_all_chunks.csv",
+            "text/csv"
+        )
+
 def main():
     # Remove default Streamlit elements
     st.set_page_config(
@@ -460,6 +593,20 @@ def main():
         layout="wide",
         menu_items={} # This removes the menu
     )
+    
+    # Initialize session state variables if they don't exist
+    if 'analysis_complete' not in st.session_state:
+        st.session_state.analysis_complete = False
+    if 'selected_questions' not in st.session_state:
+        st.session_state.selected_questions = []
+    if 'analysis_triggered' not in st.session_state:
+        st.session_state.analysis_triggered = False
+    if 'use_llm_scoring' not in st.session_state:
+        st.session_state.use_llm_scoring = False
+    if 'single_call' not in st.session_state:
+        st.session_state.single_call = True
+    if 'force_recompute' not in st.session_state:
+        st.session_state.force_recompute = False
     
     # Hide Streamlit elements using CSS
     st.markdown("""
@@ -472,14 +619,6 @@ def main():
     
     st.title("Report Analyzer")
     st.write("Upload a PDF report and select questions for sustainability report analysis.")
-    
-    # Initialize session state variables if they don't exist
-    if 'analysis_complete' not in st.session_state:
-        st.session_state.analysis_complete = False
-    if 'selected_questions' not in st.session_state:
-        st.session_state.selected_questions = []
-    if 'analysis_triggered' not in st.session_state:
-        st.session_state.analysis_triggered = False
     
     try:
         # Initialize analyzer
@@ -504,7 +643,7 @@ def main():
         
         # File selection/upload
         st.subheader("Select Report")
-        file_tab, upload_tab = st.tabs(["Previous Reports", "Upload New"])
+        file_tab, upload_tab, consolidated_tab = st.tabs(["Previous Reports", "Upload New", "Consolidated Results"])
         
         with file_tab:
             previous_files = get_uploaded_files_history()
@@ -538,14 +677,6 @@ def main():
         
         # Advanced options in expander
         with st.expander("Advanced Options"):
-            # Use session state to persist advanced options
-            if 'use_llm_scoring' not in st.session_state:
-                st.session_state.use_llm_scoring = False
-            if 'single_call' not in st.session_state:
-                st.session_state.single_call = True
-            if 'use_cache' not in st.session_state:
-                st.session_state.use_cache = True
-                
             st.session_state.use_llm_scoring = st.checkbox(
                 "Use LLM for relevance scoring",
                 value=st.session_state.use_llm_scoring
@@ -558,17 +689,11 @@ def main():
                     help="More efficient but may be less accurate with large numbers of chunks"
                 )
             
-            st.session_state.use_cache = st.checkbox(
-                "Use LLM Cache",
-                value=st.session_state.use_cache,
-                help="Cache LLM responses to improve performance for repeated queries"
+            st.session_state.force_recompute = st.checkbox(
+                "Force recompute answers (ignore cache)",
+                value=st.session_state.force_recompute,
+                help="Recompute all answers even if they are cached"
             )
-            
-            # Cache clear button
-            if st.button("Clear Cache"):
-                if hasattr(st.session_state, 'llm_cache'):
-                    del st.session_state.llm_cache
-                st.success("Cache cleared!")
         
         if st.session_state.uploaded_file:
             try:
@@ -594,7 +719,7 @@ def main():
                 # Create a single results container
                 results_container = st.container()
                 
-                # Analysis trigger with session state control
+                # Add analysis trigger with proper state handling
                 if st.button("Analyze Document") or st.session_state.analysis_triggered:
                     st.session_state.analysis_triggered = True
                     
@@ -608,7 +733,8 @@ def main():
                                     questions,
                                     st.session_state.selected_questions,
                                     st.session_state.use_llm_scoring,
-                                    st.session_state.single_call
+                                    st.session_state.single_call,
+                                    st.session_state.force_recompute  # Pass force_recompute from session state
                                 ))
                 
                 # Display results if available
@@ -619,6 +745,7 @@ def main():
                         if st.session_state.analysis_complete:
                             display_download_buttons(st.session_state.analysis_df, st.session_state.chunks_df)
                             
+                            # Add clear results button
                             if st.button("Clear Results", key="clear_results_button"):
                                 st.session_state.analysis_complete = False
                                 st.session_state.analysis_triggered = False
@@ -632,6 +759,21 @@ def main():
             except Exception as e:
                 st.error(f"Error processing uploaded file: {str(e)}")
                 
+        with consolidated_tab:
+            st.subheader("View All Results")
+            st.write("View and export consolidated results for all analyzed reports")
+            
+            # Question set selection for consolidated view
+            selected_set = st.selectbox(
+                "Select Question Set",
+                options=list(question_sets.keys()),
+                format_func=lambda x: question_sets[x]['name'],
+                key="consolidated_set"
+            )
+            
+            if selected_set:
+                display_consolidated_results(selected_set)
+
     except Exception as e:
         st.error(f"Error initializing analyzer: {str(e)}")
 

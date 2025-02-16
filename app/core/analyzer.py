@@ -349,7 +349,39 @@ Output only the scores in a JSON array, like: [0.8, 0.3, 0.0]""")
             # Return default scores on error
             return [0.0] * len(chunks)
 
-    async def process_document(self, file_path: str, selected_numbers: List[int], use_llm_scoring: bool = False, single_call: bool = True) -> AsyncGenerator[Dict, None]:
+    def _get_answers_cache_path(self, file_path: str) -> Path:
+        """Get the path for cached answers for a specific report and question set."""
+        file_hash = compute_file_hash(file_path)
+        # Include question_set in the cache key
+        cache_key = f"{Path(file_path).stem}_{file_hash[:8]}_{self.question_set}"
+        return self.cache_path / f"{cache_key}_answers.json"
+
+    def _load_cached_answers(self, file_path: str) -> Dict:
+        """Load cached answers for a report if they exist."""
+        try:
+            cache_path = self._get_answers_cache_path(file_path)
+            if cache_path.exists():
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cached_data = json.load(f)
+                log_analysis_step(f"✓ Loaded {len(cached_data)} cached answers for question set {self.question_set}")
+                return cached_data
+            log_analysis_step(f"No cached answers found for question set {self.question_set}")
+            return {}
+        except Exception as e:
+            log_analysis_step(f"Error loading cached answers for question set {self.question_set}: {str(e)}", "warning")
+            return {}
+
+    def _save_cached_answers(self, file_path: str, answers: Dict):
+        """Save answers to cache."""
+        try:
+            cache_path = self._get_answers_cache_path(file_path)
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(answers, f)
+            log_analysis_step(f"✓ Saved {len(answers)} answers for question set {self.question_set}")
+        except Exception as e:
+            log_analysis_step(f"Error saving answers for question set {self.question_set}: {str(e)}", "warning")
+
+    async def process_document(self, file_path: str, selected_numbers: List[int], use_llm_scoring: bool = False, single_call: bool = True, force_recompute: bool = False) -> AsyncGenerator[Dict, None]:
         """Process document and analyze questions.
         
         Args:
@@ -357,14 +389,21 @@ Output only the scores in a JSON array, like: [0.8, 0.3, 0.0]""")
             selected_numbers (List[int]): List of question numbers to analyze
             use_llm_scoring (bool): Whether to use LLM for scoring chunk relevance
             single_call (bool): If True, score all chunks in one LLM call
+            force_recompute (bool): If True, recompute answers even if cached
         """
         log_analysis_step(f"Starting document processing: {file_path}")
         log_analysis_step(f"Processing questions: {selected_numbers}")
-        log_analysis_step(f"LLM scoring enabled: {use_llm_scoring}")
+        log_analysis_step(f"Force recompute: {force_recompute}")
         
         try:
             # Initial status
             yield {"status": "Starting analysis..."}
+            
+            # Load cached answers
+            cached_answers = {} if force_recompute else self._load_cached_answers(file_path)
+            
+            # Track new answers to save to cache
+            new_answers = {}
             
             # Generate cache key
             cache_key = self._get_cache_key(file_path)
@@ -432,6 +471,13 @@ Output only the scores in a JSON array, like: [0.8, 0.3, 0.0]""")
             # Process each question
             for question_number in selected_numbers:
                 try:
+                    # Check if we have a cached answer and not forcing recompute
+                    answer_key = f"{self.question_set}_{question_number}"
+                    if not force_recompute and answer_key in cached_answers:
+                        log_analysis_step(f"Using cached answer for question {question_number}")
+                        yield cached_answers[answer_key]
+                        continue
+                    
                     question_data = self.get_question_by_number(question_number)
                     if not question_data:
                         continue
@@ -564,6 +610,8 @@ Output only the scores in a JSON array, like: [0.8, 0.3, 0.0]""")
                                     'question_number': question_number
                                 }
 
+                                # Store result in new answers
+                                new_answers[answer_key] = result
                                 yield result
                             else:
                                 raise ValueError("No valid JSON object found in response")
@@ -593,7 +641,12 @@ Output only the scores in a JSON array, like: [0.8, 0.3, 0.0]""")
                 except Exception as e:
                     logger.error(f"Error processing question {question_number}: {str(e)}")
                     yield {"error": f"Error processing question {question_number}: {str(e)}"}
-                    
+            
+            # Update cache with new answers
+            if new_answers:
+                cached_answers.update(new_answers)
+                self._save_cached_answers(file_path, cached_answers)
+            
         except Exception as e:
             log_analysis_step(f"Error processing document: {str(e)}", "error")
             yield {"error": f"Failed to process document: {str(e)}"}
