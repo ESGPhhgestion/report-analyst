@@ -1,6 +1,6 @@
 import pandas as pd
 import json
-from typing import Dict, Tuple, Any, List
+from typing import Dict, Tuple, Any, List, Optional
 import logging
 
 # Setup logging
@@ -36,92 +36,98 @@ def extract_evidence_text(evidence: Any) -> str:
         return f"{text} [Chunk {chunk}]"
     return str(evidence)
 
-def create_analysis_dataframes(answers: Dict, report_name: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Create analysis and chunks dataframes from answers"""
-    analysis_rows = []
-    chunks_rows = []
-    
-    logger.info(f"Creating dataframes for report: {report_name}")
-    logger.info(f"Answers keys: {list(answers.keys())}")
-    
-    def smart_json_decode(data):
-        """Helper function to handle JSON decoding intelligently"""
-        if not isinstance(data, str):
-            return data
-            
-        try:
-            decoded = json.loads(data)
-            # Check if we got a string that might be JSON
-            if isinstance(decoded, str):
-                try:
-                    # Try one more decode
-                    return json.loads(decoded)
-                except json.JSONDecodeError:
-                    # If it fails, return the first decode
-                    return decoded
-            return decoded
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {str(e)}")
-            return data
-    
-    for question_id, answer_data in answers.items():
-        if isinstance(answer_data, dict):
+def create_analysis_dataframes(cached_results: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Create analysis and chunks dataframes from database results."""
+    try:
+        analysis_rows = []
+        chunks_rows = []
+        
+        logger.info(f"Processing {len(cached_results)} results")
+        
+        # Handle each question's results
+        for question_id, data in cached_results.items():
             try:
-                # Extract and parse result if needed
-                result = smart_json_decode(answer_data.get('result', '{}'))
-                config = answer_data.get('config', {})
+                # Get the result data - it might be nested under 'result' key
+                result = data.get('result', data)
+                logger.info(f"Processing question {question_id} with keys: {list(result.keys())}")
                 
-                logger.info(f"\nProcessing question {question_id}")
-                logger.info(f"Result keys: {list(result.keys())}")
+                # Format evidence with chunk numbers and scores
+                evidence_texts = []
+                evidence_list = result.get('EVIDENCE', [])
+                for evidence in evidence_list:
+                    if isinstance(evidence, dict):
+                        text = evidence.get('text', '')
+                        chunk_num = evidence.get('chunk', 'Unknown')
+                        score = evidence.get('score', 1.0)
+                        evidence_texts.append(f"[Chunk {chunk_num}, Score: {score:.2f}] {text}")
+                    else:
+                        evidence_texts.append(str(evidence))
                 
-                # Create analysis row with configuration
+                # Create analysis row
                 analysis_row = {
-                    'Report': report_name,
-                    'Question ID': answer_data.get('question_id', question_id),
-                    'Question': answer_data.get('question_text', ''),
+                    'Question ID': question_id,
                     'Analysis': result.get('ANSWER', ''),
                     'Score': float(result.get('SCORE', 0)),
-                    'Key Evidence': '\n'.join(str(e.get('text', '')) for e in result.get('EVIDENCE', [])),
-                    'Gaps': '\n'.join(str(x) for x in result.get('GAPS', [])),
-                    'Sources': '\n'.join(str(x) for x in result.get('SOURCES', [])),
-                    'Chunk Size': int(config.get('chunk_size', 0)),
-                    'Chunk Overlap': int(config.get('chunk_overlap', 0)),
-                    'Top K': int(config.get('top_k', 0)),
-                    'Model': str(config.get('model', ''))
+                    'Key Evidence': '\n'.join(evidence_texts) if evidence_texts else '',
+                    'Gaps': '\n'.join(str(gap) for gap in result.get('GAPS', [])) if result.get('GAPS') else '',
+                    'Sources': '\n'.join(str(source) for source in result.get('SOURCES', [])) if result.get('SOURCES') else ''
                 }
                 analysis_rows.append(analysis_row)
+                logger.info(f"Added analysis row for question {question_id}")
                 
-                # Create chunk rows with configuration
-                chunks = result.get('CHUNKS', [])
-                logger.info(f"Found {len(chunks)} chunks")
+                # Process chunks
+                chunks = data.get('chunks', [])
+                logger.info(f"Processing {len(chunks)} chunks for question {question_id}")
+                
                 for chunk in chunks:
+                    # Get similarity score safely
+                    similarity_score = chunk.get('similarity_score', chunk.get('score', 0.0))
+                    
+                    # Check if this chunk is referenced in evidence
+                    chunk_num = chunk.get('chunk_order', chunk.get('position', 0))
+                    is_evidence = chunk.get('is_evidence', False) or any(
+                        (isinstance(e, dict) and str(e.get('chunk')) == str(chunk_num))
+                        for e in evidence_list
+                    )
+                    
                     chunk_row = {
-                        'Report': report_name,
-                        'Question ID': answer_data.get('question_id', question_id),
-                        'Question': answer_data.get('question_text', ''),
+                        'Question ID': question_id,
                         'Chunk Text': chunk.get('text', ''),
-                        'Vector Similarity': float(chunk.get('relevance_score', 0.0)),
-                        'LLM Score': float(chunk.get('computed_score', 0.0)),
-                        'Page': str(chunk.get('metadata', {}).get('page_number', '')),
-                        'Chunk Size': int(config.get('chunk_size', 0)),
-                        'Chunk Overlap': int(config.get('chunk_overlap', 0)),
-                        'Top K': int(config.get('top_k', 0)),
-                        'Model': str(config.get('model', ''))
+                        'Vector Similarity': similarity_score,
+                        'LLM Score': chunk.get('llm_score', 0.0),
+                        'Is Evidence': is_evidence,
+                        'Position': chunk_num
                     }
                     chunks_rows.append(chunk_row)
-                    
+                    logger.debug(f"Added chunk row {chunk_num} for {question_id} with similarity {similarity_score:.4f}")
+                
             except Exception as e:
-                logger.error(f"Error processing answer {question_id}: {str(e)}")
-                logger.error(f"Answer data: {json.dumps(answer_data, indent=2)}")
+                logger.error(f"Error processing result for question {question_id}: {str(e)}")
+                logger.error(f"Result data: {data}")
                 continue
-    
-    analysis_df = pd.DataFrame(analysis_rows)
-    chunks_df = pd.DataFrame(chunks_rows)
-    
-    logger.info(f"Created analysis DataFrame with shape: {analysis_df.shape}")
-    logger.info(f"Created chunks DataFrame with shape: {chunks_df.shape}")
-    
-    return analysis_df, chunks_df
+        
+        # Create DataFrames
+        analysis_df = pd.DataFrame(analysis_rows) if analysis_rows else pd.DataFrame()
+        chunks_df = pd.DataFrame(chunks_rows) if chunks_rows else pd.DataFrame()
+        
+        # Log DataFrame information
+        logger.info(f"Created dataframes - Analysis: {len(analysis_df)} rows, Chunks: {len(chunks_df)} rows")
+        if not analysis_df.empty:
+            logger.info(f"Analysis columns: {analysis_df.columns.tolist()}")
+            logger.info(f"Analysis non-empty counts: {analysis_df.count().to_dict()}")
+            logger.info(f"Sample row: {analysis_df.iloc[0].to_dict()}")
+        
+        if not chunks_df.empty:
+            logger.info(f"Chunks columns: {chunks_df.columns.tolist()}")
+            logger.info(f"Chunks non-empty counts: {chunks_df.count().to_dict()}")
+            logger.info(f"Vector similarity range: {chunks_df['Vector Similarity'].min():.4f} - {chunks_df['Vector Similarity'].max():.4f}")
+            logger.info(f"Evidence chunks: {chunks_df['Is Evidence'].sum()}")
+        
+        return analysis_df, chunks_df
+        
+    except Exception as e:
+        logger.error(f"Error creating dataframes: {str(e)}")
+        return pd.DataFrame(), pd.DataFrame()
 
 def is_chunk_referenced(position: int, evidence_list: List[Dict]) -> bool:
     """Check if a chunk is referenced in the evidence list"""
@@ -131,13 +137,22 @@ def is_chunk_referenced(position: int, evidence_list: List[Dict]) -> bool:
     return False
 
 def create_combined_dataframe(analysis_df: pd.DataFrame, chunks_df: pd.DataFrame) -> pd.DataFrame:
-    """Create a combined multi-index dataframe"""
+    """
+    Create a combined dataframe with analysis results and their chunks.
+    
+    Args:
+        analysis_df: DataFrame with analysis results
+        chunks_df: DataFrame with chunk information
+        
+    Returns:
+        Combined DataFrame with multi-index
+    """
     if analysis_df.empty or chunks_df.empty:
         return pd.DataFrame()
-        
-    # Create multi-index dataframes using the correct column names
-    analysis_indexed = analysis_df.set_index(['Report', 'Question ID'])
-    chunks_indexed = chunks_df.set_index(['Report', 'Question ID'])
+    
+    # Create multi-index dataframes
+    analysis_indexed = analysis_df.set_index(['Question ID'])
+    chunks_indexed = chunks_df.set_index(['Question ID'])
     
     # Combine the dataframes
     combined_df = pd.concat([analysis_indexed, chunks_indexed], axis=1)
@@ -145,4 +160,56 @@ def create_combined_dataframe(analysis_df: pd.DataFrame, chunks_df: pd.DataFrame
     # Remove duplicate columns
     combined_df = combined_df.loc[:, ~combined_df.columns.duplicated()]
     
-    return combined_df 
+    return combined_df
+
+def format_evidence_for_display(evidence_list: List[Dict[str, Any]]) -> str:
+    """Format evidence items for display in the UI"""
+    if not evidence_list:
+        return ""
+        
+    formatted = []
+    for i, evidence in enumerate(evidence_list, 1):
+        text = evidence.get('text', '')
+        page = evidence.get('metadata', {}).get('page_number', '')
+        page_info = f" (Page {page})" if page else ""
+        formatted.append(f"{i}. {text}{page_info}")
+        
+    return "\n".join(formatted)
+
+def get_analysis_summary(results: Dict[str, Any], report_name: str) -> pd.DataFrame:
+    """
+    Create a summary dataframe for all analyses in a report.
+    
+    Args:
+        results: Dict mapping question_ids to their analysis results
+        report_name: Name of the report
+        
+    Returns:
+        Summary DataFrame
+    """
+    summary_rows = []
+    
+    for question_id, data in results.items():
+        if not data or 'result' not in data:
+            continue
+            
+        result = data['result']
+        
+        # Count evidence chunks
+        evidence_count = len(result.get('EVIDENCE', []))
+        
+        # Count total chunks
+        total_chunks = len(data.get('chunks', []))
+        
+        summary_rows.append({
+            'Report': report_name,
+            'Question ID': question_id,
+            'Question': result.get('QUESTION', ''),
+            'Score': float(result.get('SCORE', 0)),
+            'Evidence Count': evidence_count,
+            'Total Chunks': total_chunks,
+            'Gaps Count': len(result.get('GAPS', [])),
+            'Analysis Length': len(result.get('ANSWER', ''))
+        })
+    
+    return pd.DataFrame(summary_rows) if summary_rows else pd.DataFrame() 

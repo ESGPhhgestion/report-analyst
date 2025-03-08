@@ -5,12 +5,13 @@ from langchain.prompts import PromptTemplate
 from langchain.schema import HumanMessage, SystemMessage
 import json
 import yaml
+from llama_index.core.llms import ChatMessage, MessageRole
 
 class PromptManager:
     def __init__(self, prompts_dir: str = "prompts"):
         self.prompts_dir = Path(prompts_dir)
 
-    def get_analysis_messages(self, question: str, context: str, guidelines: str, chunks_data: List[Dict]) -> list:
+    def get_analysis_messages(self, question: str, context: str, guidelines: str, chunks_data: List[Dict]) -> List[ChatMessage]:
         """Generate messages for TCFD question analysis"""
         # Format chunks with numbers and scores for reference
         formatted_chunks = "\n\n".join([
@@ -19,13 +20,13 @@ class PromptManager:
         ])
 
         return [
-            {
-                "role": "system",
-                "content": "You are an AI assistant in the role of a Senior Equity Analyst with expertise in climate science that analyzes companys' sustainability reports."
-            },
-            {
-                "role": "user",
-                "content": f"""With the following extracted components of the sustainability report at hand, please analyze the question and provide a comprehensive response with evidence and scoring.
+            ChatMessage(
+                role=MessageRole.SYSTEM,
+                content="You are an AI assistant in the role of a Senior Equity Analyst with expertise in climate science that analyzes companys' sustainability reports."
+            ),
+            ChatMessage(
+                role=MessageRole.USER,
+                content=f"""With the following extracted components of the sustainability report at hand, please analyze the question and provide a comprehensive response with evidence and scoring.
 
 QUESTION: {question}
 =========
@@ -59,7 +60,7 @@ IMPORTANT: Your response MUST be in valid JSON format like this example:
 }}
 
 Your FINAL_ANSWER in JSON (ensure there's no format error):"""
-            }
+            )
         ]
 
     def process_result(self, result: dict, results: dict, q_id: str):

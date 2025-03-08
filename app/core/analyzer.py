@@ -11,6 +11,7 @@ import hashlib
 import pickle
 import re
 import pandas as pd
+import sqlite3
 
 from langchain_openai import ChatOpenAI
 from llama_index.core import Document, Settings
@@ -22,6 +23,7 @@ from llama_index.readers.file import PyMuPDFReader
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.llms.openai import OpenAI
 from llama_index.core.ingestion import IngestionCache
+from llama_index.core.llms import ChatMessage, MessageRole
 
 from .prompt_manager import PromptManager
 from .storage import LlamaVectorStore
@@ -105,13 +107,16 @@ class DocumentAnalyzer:
                 cache_dir=str(self.llm_cache_path),
             )
             
-            # Configure embeddings globally for LlamaIndex
-            Settings.embed_model = OpenAIEmbedding(
+            # Initialize embeddings
+            self.embeddings = OpenAIEmbedding(
                 api_key=os.getenv('OPENAI_API_KEY'),
                 api_base=os.getenv('OPENAI_API_BASE'),
                 model_name=os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-ada-002'),
                 embed_batch_size=100
             )
+            
+            # Configure embeddings globally for LlamaIndex
+            Settings.embed_model = self.embeddings
             
             # Initialize caching
             self.use_cache = True  # Default to True, can be overridden
@@ -235,7 +240,7 @@ class DocumentAnalyzer:
         log_analysis_step(f"Computing relevance score for chunk: {chunk_text[:100]}...")
         
         try:
-            response = await self.llm.acomplete(prompt=f"""As a senior equity analyst with expertise in climate science evaluating a company's sustainability report, you are tasked with evaluating text fragments for their usefulness in answering specific TCFD questions.
+            response = await self.llm.achat(prompt=f"""As a senior equity analyst with expertise in climate science evaluating a company's sustainability report, you are tasked with evaluating text fragments for their usefulness in answering specific TCFD questions.
 
 Your task is to score the relevance and quality of evidence in each text fragment. Consider:
 
@@ -276,7 +281,7 @@ Text to evaluate:
 
 Output only the numeric score (0.0-1.0):""")
             
-            score = float(response.text.strip())
+            score = float(response.message.content.strip())
             score = max(0.0, min(1.0, score))
             log_analysis_step(f"Computed relevance score: {score:.4f}")
             return score
@@ -301,7 +306,7 @@ Output only the numeric score (0.0-1.0):""")
                     for i, chunk in enumerate(chunks)
                 ])
                 
-                response = await self.llm.acomplete(prompt=f"""As a senior equity analyst with expertise in climate science evaluating a company's sustainability report, you are tasked with evaluating text fragments for their usefulness in answering specific TCFD questions.
+                response = await self.llm.achat(prompt=f"""As a senior equity analyst with expertise in climate science evaluating a company's sustainability report, you are tasked with evaluating text fragments for their usefulness in answering specific TCFD questions.
 
 Your task is to score the relevance and quality of evidence in each text fragment marked as [CHUNK X]. Consider:
 
@@ -344,7 +349,7 @@ Output only the scores, one per line, in order:""")
                 
                 # Parse scores from response
                 try:
-                    scores = [float(score.strip()) for score in response.text.strip().split('\n')]
+                    scores = [float(score.strip()) for score in response.message.content.strip().split('\n')]
                     if len(scores) != len(chunks):
                         raise ValueError(f"Got {len(scores)} scores for {len(chunks)} chunks")
                     return scores
@@ -426,81 +431,143 @@ Output only the scores, one per line, in order:""")
         except Exception as e:
             logger.warning(f"[ANALYSIS] Cache ERROR: Failed to save answers: {e}")
 
-    async def process_document(self, file_path: str, question_ids: List[str]) -> AsyncGenerator[Dict, None]:
-        """Process document with caching"""
+    async def process_document(self, 
+                             file_path: str, 
+                             selected_questions: List[int],
+                             use_llm_scoring: bool = False,
+                             single_call: bool = True,
+                             force_recompute: bool = False) -> AsyncGenerator[Dict, None]:
+        """Process a document for selected questions"""
         try:
-            # Get current configuration
-            config = {
-                'chunk_size': self.chunk_params['chunk_size'],
-                'chunk_overlap': self.chunk_params['chunk_overlap'],
-                'top_k': self.chunk_params['top_k'],
-                'model': self.llm.model,
-                'question_set': self.question_set
-            }
-            logger.info(f"Processing document with config: {config}")
-
-            # Check cache first
-            cached_results = self.cache_manager.get_analysis(
+            # Add more detailed logging
+            logger.info(f"[ANALYSIS] Starting document processing for {file_path}")
+            logger.info(f"[ANALYSIS] Selected questions: {selected_questions}")
+            logger.info(f"[ANALYSIS] LLM scoring: {use_llm_scoring}, Single call: {single_call}, Force recompute: {force_recompute}")
+            logger.info(f"[ANALYSIS] Current chunk parameters: size={self.chunk_params['chunk_size']}, overlap={self.chunk_params['chunk_overlap']}, top_k={self.chunk_params['top_k']}")
+            
+            # Store the current file path for use in _get_similar_chunks
+            self.current_file_path = file_path
+            
+            # 1. Load and chunk the document - use CacheManager with current chunk parameters
+            logger.info(f"[ANALYSIS] Getting document chunks from cache for {file_path} with size={self.chunk_params['chunk_size']}, overlap={self.chunk_params['chunk_overlap']}")
+            chunks = self.cache_manager.get_document_chunks(
                 file_path=file_path,
-                config=config,
-                question_ids=question_ids
+                chunk_size=self.chunk_params['chunk_size'],
+                chunk_overlap=self.chunk_params['chunk_overlap']
             )
-
-            # Return cached results immediately
-            for qid, result in cached_results.items():
-                yield {
-                    'status': 'cached',
-                    'question_id': qid,
-                    'result': result
-                }
-
-            # Process remaining questions
-            remaining_questions = [q for q in question_ids if q not in cached_results]
-            if not remaining_questions:
-                logger.info("All questions found in cache")
-                return
-
-            # Get or compute document chunks
-            chunks = self.cache_manager.get_vectors(file_path)
+            logger.info(f"[ANALYSIS] Retrieved {len(chunks)} chunks from cache")
+            
             if not chunks:
-                logger.info("No cached vectors found, processing document")
-                yield {'status': 'processing', 'message': 'Creating document chunks...'}
+                logger.info(f"[ANALYSIS] No chunks found in cache with current parameters, creating new chunks")
+                # If no chunks in cache with current parameters, create them
                 chunks = self._create_chunks(file_path)
-                self.cache_manager.save_vectors(file_path, chunks)
-
-            # Process each uncached question
-            for question_id in remaining_questions:
+                logger.info(f"[ANALYSIS] Created {len(chunks)} new chunks")
+                
+                # Save chunks to cache with current parameters
+                self.cache_manager.save_document_chunks(
+                    file_path=file_path,
+                    chunks=chunks,
+                    chunk_size=self.chunk_params['chunk_size'],
+                    chunk_overlap=self.chunk_params['chunk_overlap']
+                )
+                logger.info(f"[ANALYSIS] Saved {len(chunks)} chunks to cache")
+            
+            yield {"status": f"Document loaded with {len(chunks)} chunks"}
+            
+            # 2. Process each question
+            for question_number in selected_questions:
                 try:
-                    logger.info(f"Processing question {question_id}")
-                    yield {'status': 'processing', 'message': f'Analyzing question {question_id}...'}
-
-                    result = await self._analyze_question(question_id, chunks)
+                    logger.info(f"[ANALYSIS] Processing question number {question_number}")
+                    question_data = self.get_question_by_number(question_number)
+                    if not question_data:
+                        logger.warning(f"[ANALYSIS] Question {question_number} not found")
+                        yield {"error": f"Question {question_number} not found"}
+                        continue
+                        
+                    question_id = f"{self.question_set}_{question_number}"
+                    logger.info(f"[ANALYSIS] Question ID: {question_id}")
                     
-                    # Save to cache
+                    yield {"status": f"Processing question {question_number}: {question_data['text'][:50]}..."}
+                    
+                    # 3. Get similar chunks using embeddings with current parameters
+                    logger.info(f"[ANALYSIS] Getting similar chunks for question {question_id}")
+                    similar_chunks = await self._get_similar_chunks(
+                        question_data['text'],
+                        chunks,
+                        self.chunk_params['top_k']
+                    )
+                    logger.info(f"[ANALYSIS] Found {len(similar_chunks)} similar chunks")
+                    
+                    # 4. Run LLM analysis
+                    logger.info(f"[ANALYSIS] Running LLM analysis for question {question_id}")
+                    result = await self._analyze_chunks(
+                        question_data,
+                        similar_chunks,
+                        use_llm_scoring
+                    )
+                    logger.info(f"[ANALYSIS] LLM analysis complete for question {question_id}")
+                    
+                    # Process evidence and update chunks
+                    if "EVIDENCE" in result:
+                        logger.info(f"Processing {len(result['EVIDENCE'])} evidence items")
+                        evidence_items = []
+                        for evidence_idx, evidence in enumerate(result["EVIDENCE"]):
+                            # Extract chunk number from evidence
+                            if isinstance(evidence, dict):
+                                chunk_num = evidence.get("chunk")
+                                if chunk_num is not None:
+                                    chunk_idx = chunk_num - 1  # Convert to 0-based index
+                                    if 0 <= chunk_idx < len(similar_chunks):
+                                        # Add evidence item with chunk reference
+                                        evidence_items.append({
+                                            "chunk": chunk_num,
+                                            "text": similar_chunks[chunk_idx]['text'],
+                                            "score": evidence.get('score', 1.0),
+                                            "order": evidence_idx + 1,
+                                            "metadata": similar_chunks[chunk_idx].get('metadata', {})
+                                        })
+                                        logger.debug(f"Added evidence {evidence_idx + 1} from chunk {chunk_num}")
+                    
+                        # Replace evidence array with processed items
+                        result["EVIDENCE"] = evidence_items
+                        logger.info(f"Final evidence count: {len(evidence_items)}")
+                    
+                    # 5. Save complete analysis
+                    logger.info(f"[ANALYSIS] Saving analysis result for question {question_id}")
+                    
+                    # Create config dict for cache manager
+                    config = {
+                        'chunk_size': self.chunk_params['chunk_size'],
+                        'chunk_overlap': self.chunk_params['chunk_overlap'],
+                        'top_k': self.chunk_params['top_k'],
+                        'model': self.llm.model,
+                        'question_set': self.question_set
+                    }
+                    
+                    # Save analysis result
                     self.cache_manager.save_analysis(
                         file_path=file_path,
                         question_id=question_id,
                         result=result,
                         config=config
                     )
-
+                    logger.info(f"[ANALYSIS] Analysis saved for question {question_id}")
+                    
+                    # 8. Yield the result
+                    logger.info(f"[ANALYSIS] Yielding result for question {question_id}")
                     yield {
-                        'status': 'complete',
+                        'question_number': question_number,
                         'question_id': question_id,
                         'result': result
                     }
-
+                    
                 except Exception as e:
-                    logger.error(f"Error processing question {question_id}: {str(e)}", exc_info=True)
-                    yield {
-                        'status': 'error',
-                        'question_id': question_id,
-                        'error': str(e)
-                    }
-
+                    logger.error(f"[ANALYSIS] Error processing question {question_number}: {str(e)}", exc_info=True)
+                    yield {"error": f"Error processing question {question_number}: {str(e)}"}
+                
         except Exception as e:
-            logger.error(f"Error in process_document: {str(e)}", exc_info=True)
-            yield {'status': 'error', 'error': str(e)}
+            logger.error(f"[ANALYSIS] Error processing document: {str(e)}", exc_info=True)
+            yield {"error": f"Error processing document: {str(e)}"}
 
     def _create_chunks(self, file_path: str) -> List[Dict[str, Any]]:
         """Create document chunks with embeddings"""
@@ -508,31 +575,95 @@ Output only the scores, one per line, in order:""")
             logger.info(f"Creating chunks for {file_path}")
             reader = PyMuPDFReader()
             docs = reader.load(file_path=file_path)
+            logger.info(f"Loaded {len(docs)} pages from document")
             
             # Convert the documents to text and create new Document objects
             text_chunks = []
             for doc in docs:
                 nodes = self.text_splitter.split_text(doc.text)
                 text_chunks.extend([
-                    Document(text=chunk, metadata=doc.metadata)
+                    Document(text=chunk, metadata={
+                        **doc.metadata,
+                        'chunk_size': self.chunk_params['chunk_size'],
+                        'chunk_overlap': self.chunk_params['chunk_overlap']
+                    })
                     for chunk in nodes
                 ])
             
             logger.info(f"Created {len(text_chunks)} chunks")
             
-            # Convert to the expected dictionary format with embeddings
+            # Compute embeddings in batches
+            BATCH_SIZE = 100  # Process 100 chunks at a time
             chunks_data = []
-            for chunk in text_chunks:
-                chunk_dict = {
-                    "text": chunk.text,
-                    "metadata": chunk.metadata,
-                    "similarity": 0.0,  # Will be populated during analysis
-                    "computed_score": 0.0  # Will be populated during analysis
-                }
-                chunks_data.append(chunk_dict)
             
-            # Save chunks to cache
-            self.cache_manager.save_vectors(file_path, chunks_data)
+            for i in range(0, len(text_chunks), BATCH_SIZE):
+                batch = text_chunks[i:i + BATCH_SIZE]
+                logger.info(f"Computing embeddings for batch {i//BATCH_SIZE + 1}/{(len(text_chunks)-1)//BATCH_SIZE + 1}")
+                
+                # Get text from batch and clean it
+                batch_texts = []
+                for chunk in batch:
+                    # Clean and validate text
+                    text = chunk.text.strip()
+                    if text and len(text) > 0:
+                        # Remove any null characters and normalize whitespace
+                        text = ' '.join(text.replace('\x00', '').split())
+                        batch_texts.append(text)
+                    else:
+                        logger.warning(f"Skipping empty or invalid chunk")
+                        continue
+                
+                try:
+                    # Only compute embeddings if we have valid texts
+                    if batch_texts:
+                        logger.info(f"Computing embeddings for {len(batch_texts)} texts in batch")
+                        batch_embeddings = self.embeddings.get_text_embedding_batch(batch_texts)
+                        logger.info(f"Successfully computed {len(batch_embeddings)} embeddings")
+                        
+                        # Create chunk dictionaries with embeddings
+                        for chunk, embedding in zip(batch, batch_embeddings):
+                            if embedding is not None:  # Only add chunks with valid embeddings
+                                chunk_dict = {
+                                    "text": chunk.text,
+                                    "metadata": chunk.metadata,
+                                    "embedding": np.array(embedding, dtype=np.float32),
+                                    "similarity": 0.0,  # Will be populated during analysis
+                                    "computed_score": 0.0  # Will be populated during analysis
+                                }
+                                chunks_data.append(chunk_dict)
+                                logger.debug(f"Added chunk with text length {len(chunk.text)}")
+                            else:
+                                logger.warning(f"Skipping chunk - embedding is None")
+                            
+                except Exception as e:
+                    logger.error(f"Error computing embeddings for batch: {str(e)}", exc_info=True)
+                    # Continue with next batch, storing chunks without embeddings
+                    for chunk in batch:
+                        chunk_dict = {
+                            "text": chunk.text,
+                            "metadata": chunk.metadata,
+                            "embedding": None,
+                            "similarity": 0.0,
+                            "computed_score": 0.0
+                        }
+                        chunks_data.append(chunk_dict)
+                        logger.warning(f"Added chunk without embedding due to error")
+            
+            # Log embedding statistics
+            chunks_with_embeddings = sum(1 for c in chunks_data if c["embedding"] is not None)
+            logger.info(f"Created {len(chunks_data)} chunks, {chunks_with_embeddings} with embeddings")
+            
+            # Only save chunks that have valid embeddings
+            valid_chunks = [c for c in chunks_data if c["embedding"] is not None]
+            if valid_chunks:
+                logger.info(f"Saving {len(valid_chunks)} valid chunks to cache")
+                try:
+                    self.cache_manager.save_vectors(file_path, valid_chunks)
+                    logger.info(f"Successfully saved chunks and vectors to cache")
+                except Exception as e:
+                    logger.error(f"Failed to save vectors to cache: {str(e)}", exc_info=True)
+            else:
+                logger.warning("No valid chunks to save to cache")
             
             return chunks_data
             
@@ -540,84 +671,152 @@ Output only the scores, one per line, in order:""")
             logger.error(f"Error creating chunks: {str(e)}", exc_info=True)
             raise
 
-    async def _analyze_question(self, question_id: str, chunks: List[Dict]) -> Dict:
-        """Analyze a single question"""
+    async def _analyze_chunks(self, question_data: Dict[str, Any], chunks: List[Dict[str, Any]], use_llm_scoring: bool = False) -> Dict[str, Any]:
+        """Analyze chunks using LLM to extract evidence and generate answer."""
         try:
-            # Get question data
-            question_data = self.questions.get(question_id)
-            if not question_data:
-                raise ValueError(f"Question {question_id} not found")
+            logger.info(f"Analyzing {len(chunks)} chunks for question: {question_data['text'][:100]}...")
             
-            # Sort chunks by similarity score
-            sorted_chunks = sorted(chunks, key=lambda x: x.get('similarity', 0.0), reverse=True)
-            top_chunks = sorted_chunks[:self.chunk_params['top_k']]
-            context = "\n".join(chunk['text'] for chunk in top_chunks)
-            
-            # Get LLM response with sorted chunks data
+            # Process chunks first
+            processed_chunks = []
+            for i, chunk in enumerate(chunks):
+                logger.debug(f"Processing chunk {i+1}/{len(chunks)}")
+                # Get similarity score from either 'score' (from vector store) or 'similarity_score' (from cache)
+                similarity_score = chunk.get('score', chunk.get('similarity_score', 0.0))
+                chunk_data = {
+                    'id': chunk.get('id'),
+                    'text': chunk['text'],
+                    'chunk_order': i,
+                    'similarity_score': similarity_score,
+                    'llm_score': 0.0,
+                    'is_evidence': False,
+                    'evidence_order': None,
+                    'metadata': chunk.get('metadata', {}),
+                    'relevance_metadata': {}
+                }
+                processed_chunks.append(chunk_data)
+                logger.debug(f"Processed chunk with similarity score: {similarity_score:.4f}")
+                
+            # Create analysis prompt with indexed chunks
             messages = self.prompt_manager.get_analysis_messages(
                 question=question_data['text'],
-                context=context,
-                guidelines=question_data['guidelines'],
-                chunks_data=top_chunks
+                context="",
+                guidelines=question_data.get('guidelines', ''),
+                chunks_data=[{
+                    'index': i + 1,  # Use 1-based indexing for LLM
+                    'text': c['text'],
+                    'metadata': c['metadata']
+                } for i, c in enumerate(processed_chunks)]
             )
             
-            # Convert messages to a single prompt for LlamaIndex OpenAI
-            prompt = "\n\n".join([
-                f"{msg['role'].upper()}: {msg['content']}"
-                for msg in messages
-            ])
-            
-            result = await self.llm.acomplete(prompt=prompt)
-            
-            # Extract JSON from response
-            try:
-                result_text = result.text.strip()
-                
-                # Find the first { and last } to extract just the JSON object
-                json_start = result_text.find('{')
-                json_end = result_text.rfind('}') + 1
-                
-                if json_start >= 0 and json_end > json_start:
-                    result_text = result_text[json_start:json_end]
-                    result_text = result_text.replace(',}', '}')
-                    result_text = result_text.replace('```json', '').replace('```', '')
-                    
-                    result_json = json.loads(result_text)
-                    
-                    # Ensure we have all required keys
-                    required_keys = ["ANSWER", "SCORE", "EVIDENCE", "GAPS", "SOURCES"]
-                    missing_keys = [key for key in required_keys if key not in result_json]
-                    if missing_keys:
-                        raise ValueError(f"Missing required keys in response: {missing_keys}")
-                    
-                    # Create final result dictionary
-                    result_dict = {
-                        "answer": result_json["ANSWER"],
-                        "score": result_json["SCORE"],
-                        "evidence": result_json["EVIDENCE"],
-                        "gaps": result_json["GAPS"],
-                        "sources": result_json["SOURCES"],
-                        "chunks": [
-                            {
-                                "text": chunk["text"],
-                                "similarity": float(chunk.get("similarity", 0.0)),
-                                "llm_score": float(chunk.get("computed_score", 0.0))
-                            }
-                            for chunk in top_chunks
-                        ]
-                    }
-                    
-                    return result_dict
+            # Log the exact messages being sent to the LLM
+            logger.info("=== LLM Input Messages ===")
+            for msg in messages:
+                if isinstance(msg, ChatMessage):
+                    logger.info(f"Role: {msg.role}")
+                    logger.info(f"Content: {msg.content}")
                 else:
-                    raise ValueError("No valid JSON object found in response")
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON decode error: {str(e)}\nResponse text: {result_text[:200]}")
+                    logger.warning(f"Unexpected message type: {type(msg)}")
+            logger.info("=== End LLM Input Messages ===")
+            
+            # Get LLM response
+            try:
+                response = await self.llm.achat(messages)
+                response_text = response.message.content  # Changed from response.content to response.message.content
+                logger.info("=== LLM Response ===")
+                logger.info(response_text)
+                logger.info("=== End LLM Response ===")
+            except Exception as e:
+                logger.error(f"Error getting LLM response: {str(e)}")
                 raise
+            
+            # Parse the response
+            try:
+                result = json.loads(response_text)
+                logger.info("=== Parsed Result ===")
+                logger.info(json.dumps(result, indent=2))
+                logger.info("=== End Parsed Result ===")
+            except json.JSONDecodeError:
+                logger.warning("Response is not valid JSON, attempting to extract")
+                import re
+                json_match = re.search(r'({.*})', response_text, re.DOTALL)
+                if json_match:
+                    try:
+                        result = json.loads(json_match.group(1))
+                        logger.info("=== Extracted and Parsed Result ===")
+                        logger.info(json.dumps(result, indent=2))
+                        logger.info("=== End Extracted and Parsed Result ===")
+                    except json.JSONDecodeError:
+                        logger.error("Failed to extract valid JSON from response")
+                        result = {
+                            "ANSWER": response_text,
+                            "SCORE": 0,
+                            "EVIDENCE": [],
+                            "GAPS": ["Error parsing response"],
+                            "SOURCES": []
+                        }
+                else:
+                    result = {
+                        "ANSWER": response_text,
+                        "SCORE": 0,
+                        "EVIDENCE": [],
+                        "GAPS": ["Error parsing response"],
+                        "SOURCES": []
+                    }
+            
+            # Add question information to result
+            result['question_text'] = question_data['text']
+            result['guidelines'] = question_data.get('guidelines', '')
+            
+            # Process evidence and update chunks
+            if "EVIDENCE" in result:
+                logger.info(f"Processing {len(result['EVIDENCE'])} evidence items")
+                evidence_items = []
+                for evidence_idx, evidence in enumerate(result["EVIDENCE"]):
+                    # Extract chunk number from evidence
+                    if isinstance(evidence, dict):
+                        chunk_num = evidence.get("chunk")
+                        if chunk_num is not None:
+                            chunk_idx = chunk_num - 1  # Convert to 0-based index
+                            if 0 <= chunk_idx < len(processed_chunks):
+                                # Update chunk information
+                                processed_chunks[chunk_idx].update({
+                                    'is_evidence': True,
+                                    'evidence_order': evidence_idx + 1,
+                                    'llm_score': evidence.get('score', 1.0)
+                                })
+                                # Add evidence item with chunk reference
+                                evidence_items.append({
+                                    "chunk": chunk_num,
+                                    "text": processed_chunks[chunk_idx]['text'],
+                                    "score": evidence.get('score', 1.0),
+                                    "order": evidence_idx + 1,
+                                    "metadata": processed_chunks[chunk_idx]['metadata']
+                                })
+                                logger.info(f"Added evidence {evidence_idx + 1} from chunk {chunk_num}: {processed_chunks[chunk_idx]['text'][:100]}...")
                 
+                # Replace evidence array with processed items
+                result["EVIDENCE"] = evidence_items
+                logger.info(f"Final evidence count: {len(evidence_items)}")
+            else:
+                logger.warning("No EVIDENCE field found in result")
+            
+            # Add processed chunks to result
+            result['chunks'] = processed_chunks
+            logger.info(f"Analysis complete. Found {sum(1 for c in processed_chunks if c['is_evidence'])} evidence chunks")
+            return result
+            
         except Exception as e:
-            logger.error(f"Error analyzing question: {str(e)}", exc_info=True)
-            raise
+            logger.error(f"Error analyzing chunks: {str(e)}", exc_info=True)
+            return {
+                "ANSWER": f"Error analyzing document: {str(e)}",
+                "SCORE": 0,
+                "EVIDENCE": [],
+                "GAPS": ["Error during analysis"],
+                "SOURCES": [],
+                "chunks": processed_chunks if 'processed_chunks' in locals() else [],
+                "question_text": question_data['text'],
+                "guidelines": question_data.get('guidelines', '')
+            }
 
     def _load_questions(self) -> dict:
         """Load questions from YAML files"""
@@ -755,6 +954,186 @@ Output only the scores, one per line, in order:""")
             logger.warning(f"Error parsing config from filename {filename}: {e}")
             return config 
 
+    async def _get_similar_chunks(self, query_text: str, chunks: List[Dict], top_k: int) -> List[Dict]:
+        """
+        Get chunks most similar to the query text using vector similarity.
+        
+        Args:
+            query_text: The text to compare chunks against
+            chunks: List of document chunks
+            top_k: Number of most similar chunks to return
+            
+        Returns:
+            List of most similar chunks with similarity scores
+        """
+        try:
+            logger.info(f"Getting similar chunks for query: {query_text[:50]}...")
+            
+            # Get embedding for the query
+            query_embedding = self.embeddings.get_text_embedding(query_text)
+            
+            # Ensure the embedding is a numpy array with the correct dtype
+            query_embedding = np.array(query_embedding, dtype=np.float32)
+            
+            # Use cache_manager to get similar chunks
+            similar_chunks = await self.cache_manager.get_similar_chunks(
+                query_embedding=query_embedding,
+                file_path=self.current_file_path,
+                top_k=top_k,
+                chunk_size=self.chunk_params['chunk_size'],
+                chunk_overlap=self.chunk_params['chunk_overlap']
+            )
+            
+            logger.info(f"Found {len(similar_chunks)} similar chunks")
+            return similar_chunks
+            
+        except Exception as e:
+            logger.error(f"Error getting similar chunks: {str(e)}", exc_info=True)
+            return []
+
+    def _parse_analysis_response(self, response_text: str) -> Dict[str, Any]:
+        """Parse the LLM response to extract structured analysis data.
+        
+        Args:
+            response_text: The raw text response from the LLM
+            
+        Returns:
+            Dict containing structured analysis data
+        """
+        try:
+            logger.info(f"Parsing analysis response: {response_text[:100]}...")
+            
+            # Initialize result structure
+            result = {
+                "ANSWER": "",
+                "SCORE": 0,
+                "EVIDENCE": [],
+                "GAPS": [],
+                "SOURCES": []
+            }
+            
+            # Try to parse as JSON
+            try:
+                parsed_json = json.loads(response_text)
+                
+                # Update result with parsed JSON
+                if "ANSWER" in parsed_json:
+                    result["ANSWER"] = parsed_json["ANSWER"]
+                
+                if "SCORE" in parsed_json:
+                    try:
+                        result["SCORE"] = float(parsed_json["SCORE"])
+                    except (ValueError, TypeError):
+                        # Try to extract a number if it's not a valid float
+                        if isinstance(parsed_json["SCORE"], str):
+                            import re
+                            score_match = re.search(r'\d+(\.\d+)?', parsed_json["SCORE"])
+                            if score_match:
+                                result["SCORE"] = float(score_match.group(0))
+                
+                if "EVIDENCE" in parsed_json:
+                    evidence_list = []
+                    for evidence in parsed_json["EVIDENCE"]:
+                        if isinstance(evidence, dict):
+                            # Extract chunk number
+                            chunk = evidence.get("chunk")
+                            if chunk is not None:
+                                evidence_item = {
+                                    "chunk_index": int(chunk) - 1,  # Convert to 0-based index
+                                    "order": len(evidence_list) + 1,
+                                    "score": 1.0,  # Default score
+                                    "text": evidence.get("text", "")
+                                }
+                                evidence_list.append(evidence_item)
+                    result["EVIDENCE"] = evidence_list
+                
+                if "GAPS" in parsed_json:
+                    result["GAPS"] = parsed_json["GAPS"]
+                
+                if "SOURCES" in parsed_json:
+                    result["SOURCES"] = parsed_json["SOURCES"]
+                    
+                return result
+                
+            except json.JSONDecodeError:
+                logger.warning(f"Response is not valid JSON: {response_text[:100]}...")
+                
+                # Try to extract JSON from the response
+                import re
+                json_match = re.search(r'({.*})', response_text, re.DOTALL)
+                if json_match:
+                    try:
+                        parsed_json = json.loads(json_match.group(1))
+                        # Recursively call this method with the extracted JSON
+                        return self._parse_analysis_response(json_match.group(1))
+                    except json.JSONDecodeError:
+                        logger.error("Failed to extract valid JSON from response")
+                
+                # If JSON parsing fails, try to extract sections using markdown headers
+                sections = response_text.split("###")
+                
+                for section in sections:
+                    section = section.strip()
+                    if not section:
+                        continue
+                        
+                    # Extract section name and content
+                    parts = section.split("\n", 1)
+                    if len(parts) < 2:
+                        continue
+                        
+                    section_name = parts[0].strip().upper()
+                    section_content = parts[1].strip()
+                    
+                    if section_name == "ANSWER":
+                        result["ANSWER"] = section_content
+                    elif section_name == "SCORE":
+                        try:
+                            result["SCORE"] = float(section_content)
+                        except ValueError:
+                            # If score is not a valid float, extract first number found
+                            import re
+                            score_match = re.search(r'\d+(\.\d+)?', section_content)
+                            if score_match:
+                                result["SCORE"] = float(score_match.group(0))
+                    elif section_name == "EVIDENCE":
+                        # Parse evidence items
+                        evidence_items = []
+                        for line in section_content.split("\n"):
+                            line = line.strip()
+                            if not line:
+                                continue
+                                
+                            # Try to extract chunk index
+                            import re
+                            chunk_match = re.search(r'\[CHUNK (\d+)\]', line)
+                            if chunk_match:
+                                evidence_item = {
+                                    "chunk_index": int(chunk_match.group(1)) - 1,  # Convert to 0-based index
+                                    "order": len(evidence_items) + 1,
+                                    "score": 1.0,  # Default score
+                                    "text": line
+                                }
+                                evidence_items.append(evidence_item)
+                        
+                        result["EVIDENCE"] = evidence_items
+                    elif section_name == "GAPS":
+                        result["GAPS"] = [line.strip() for line in section_content.split("\n") if line.strip()]
+                    elif section_name == "SOURCES":
+                        result["SOURCES"] = [int(s.strip()) for s in section_content.split(",") if s.strip().isdigit()]
+                
+                return result
+                
+        except Exception as e:
+            logger.error(f"Error parsing analysis response: {str(e)}", exc_info=True)
+            return {
+                "ANSWER": f"Error parsing analysis: {str(e)}",
+                "SCORE": 0,
+                "EVIDENCE": [],
+                "GAPS": ["Error during analysis"],
+                "SOURCES": []
+            }
+
 def create_analysis_dataframes(results: Dict) -> pd.DataFrame:
     """Create analysis dataframes with proper type handling"""
     analysis_rows = []
@@ -777,9 +1156,9 @@ def create_analysis_dataframes(results: Dict) -> pd.DataFrame:
             'Question': str(question_text),
             'Analysis': str(data.get('ANSWER', '')),
             'Score': float(data.get('SCORE', 0)),
-            'Key Evidence': ', '.join(str(x) for x in data.get('EVIDENCE', [])),
-            'Gaps': ', '.join(str(x) for x in data.get('GAPS', [])),
-            'Sources': ', '.join(str(x) for x in data.get('SOURCES', []))
+            'Key Evidence': ', '.join([str(x) for x in data.get('EVIDENCE', [])]),
+            'Gaps': ', '.join([str(x) for x in data.get('GAPS', [])]),
+            'Sources': ', '.join([str(x) for x in data.get('SOURCES', [])])
         }
         analysis_rows.append(row)
     
