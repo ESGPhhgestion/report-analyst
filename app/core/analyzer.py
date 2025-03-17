@@ -518,19 +518,28 @@ Output only the scores, one per line, in order:""")
                                 if chunk_num is not None:
                                     chunk_idx = chunk_num - 1  # Convert to 0-based index
                                     if 0 <= chunk_idx < len(similar_chunks):
-                                        # Add evidence item with chunk reference
+                                        # Update chunk information
+                                        similar_chunks[chunk_idx].update({
+                                            'is_evidence': True,
+                                            'evidence_order': evidence_idx + 1,
+                                            'llm_score': evidence.get('score', 1.0)
+                                        })
+                                        # Add evidence item with chunk reference and preserve LLM's evidence text
                                         evidence_items.append({
                                             "chunk": chunk_num,
-                                            "text": similar_chunks[chunk_idx]['text'],
+                                            "text": evidence.get('text', ''),  # Keep LLM's evidence text
+                                            "chunk_text": similar_chunks[chunk_idx]['text'],  # Store full chunk text separately
                                             "score": evidence.get('score', 1.0),
                                             "order": evidence_idx + 1,
-                                            "metadata": similar_chunks[chunk_idx].get('metadata', {})
+                                            "metadata": similar_chunks[chunk_idx]['metadata']
                                         })
-                                        logger.debug(f"Added evidence {evidence_idx + 1} from chunk {chunk_num}")
-                    
+                                        logger.info(f"Added evidence {evidence_idx + 1} from chunk {chunk_num}: {evidence.get('text', '')[:100]}...")
+                
                         # Replace evidence array with processed items
                         result["EVIDENCE"] = evidence_items
                         logger.info(f"Final evidence count: {len(evidence_items)}")
+                    else:
+                        logger.warning("No EVIDENCE field found in result")
                     
                     # 5. Save complete analysis
                     logger.info(f"[ANALYSIS] Saving analysis result for question {question_id}")
@@ -784,15 +793,16 @@ Output only the scores, one per line, in order:""")
                                     'evidence_order': evidence_idx + 1,
                                     'llm_score': evidence.get('score', 1.0)
                                 })
-                                # Add evidence item with chunk reference
+                                # Add evidence item with chunk reference and preserve LLM's evidence text
                                 evidence_items.append({
                                     "chunk": chunk_num,
-                                    "text": processed_chunks[chunk_idx]['text'],
+                                    "text": evidence.get('text', ''),  # Keep LLM's evidence text
+                                    "chunk_text": processed_chunks[chunk_idx]['text'],  # Store full chunk text separately
                                     "score": evidence.get('score', 1.0),
                                     "order": evidence_idx + 1,
                                     "metadata": processed_chunks[chunk_idx]['metadata']
                                 })
-                                logger.info(f"Added evidence {evidence_idx + 1} from chunk {chunk_num}: {processed_chunks[chunk_idx]['text'][:100]}...")
+                                logger.info(f"Added evidence {evidence_idx + 1} from chunk {chunk_num}: {evidence.get('text', '')[:100]}...")
                 
                 # Replace evidence array with processed items
                 result["EVIDENCE"] = evidence_items

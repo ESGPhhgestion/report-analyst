@@ -56,10 +56,9 @@ def create_analysis_dataframes(cached_results: Dict) -> Tuple[pd.DataFrame, pd.D
                 evidence_list = result.get('EVIDENCE', [])
                 for evidence in evidence_list:
                     if isinstance(evidence, dict):
-                        text = evidence.get('text', '')
+                        text = evidence.get('text', '')  # Use LLM's evidence text
                         chunk_num = evidence.get('chunk', 'Unknown')
-                        score = evidence.get('score', 1.0)
-                        evidence_texts.append(f"[Chunk {chunk_num}, Score: {score:.2f}] {text}")
+                        evidence_texts.append(f"{text} [Chunk {chunk_num}]")
                     else:
                         evidence_texts.append(str(evidence))
                 

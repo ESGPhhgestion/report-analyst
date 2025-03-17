@@ -1165,6 +1165,9 @@ def main():
                         if question_set_data["description"]:
                             st.write(question_set_data["description"])
                         
+                        # Add cache selector
+                        display_cache_selector(str(file_path))
+                        
                         # Add question selection UI
                         st.subheader("Select Questions")
                         selected_questions = []
@@ -1176,11 +1179,20 @@ def main():
                                 selected_questions.append(q_id)
                         
                         # Analysis button and results
-                        if st.button("Analyze Selected Questions", key="analyze_button"):
+                        col1, col2 = st.columns([2, 1])
+                        with col1:
+                            analyze_clicked = st.button("Analyze Selected Questions", key="analyze_button")
+                        with col2:
+                            reanalyze_clicked = st.button("🔄 Reanalyze", key="reanalyze_button")
+                        
+                        if analyze_clicked or reanalyze_clicked:
                             if not selected_questions:
                                 st.warning("Please select at least one question to analyze.")
                             else:
                                 try:
+                                    # Set force_recompute based on which button was clicked
+                                    st.session_state.force_recompute = reanalyze_clicked
+                                    
                                     # Get current configuration
                                     config = {
                                         'chunk_size': st.session_state.new_chunk_size,
@@ -1190,39 +1202,48 @@ def main():
                                         'question_set': st.session_state.new_question_set
                                     }
                                     
-                                    # First get all cached results for selected questions
-                                    cached_results = analyzer.analyzer.cache_manager.get_analysis(
-                                        file_path=str(file_path),
-                                        config=config,
-                                        question_ids=selected_questions
-                                    )
-                                    
-                                    # Determine which questions need analysis
-                                    cached_questions = set(cached_results.keys() if cached_results else set())
-                                    questions_to_analyze = [q for q in selected_questions if q not in cached_questions]
-                                    
                                     # Initialize progress display
                                     progress_text = st.empty()
                                     
-                                    if questions_to_analyze:
-                                        progress_text.info(f"Analyzing {len(questions_to_analyze)} new questions...")
-                                        # Run analysis for uncached questions
+                                    if reanalyze_clicked:
+                                        # For reanalysis, skip cache check and analyze all selected questions
+                                        progress_text.info(f"Reanalyzing {len(selected_questions)} questions...")
                                         asyncio.run(run_analysis(
                                             analyzer=analyzer,
                                             file_path=str(file_path),
-                                            selected_questions=questions_to_analyze,
+                                            selected_questions=selected_questions,
                                             progress_text=progress_text
                                         ))
-                                        
-                                        # Get updated results including both cached and new
-                                        all_results = analyzer.analyzer.cache_manager.get_analysis(
+                                    else:
+                                        # For normal analysis, check cache first
+                                        cached_results = analyzer.analyzer.cache_manager.get_analysis(
                                             file_path=str(file_path),
                                             config=config,
                                             question_ids=selected_questions
                                         )
-                                    else:
-                                        all_results = cached_results
-                                        progress_text.info("Using cached results for all selected questions")
+                                        
+                                        # Determine which questions need analysis
+                                        cached_questions = set(cached_results.keys() if cached_results else set())
+                                        questions_to_analyze = [q for q in selected_questions if q not in cached_questions]
+                                        
+                                        if questions_to_analyze:
+                                            progress_text.info(f"Analyzing {len(questions_to_analyze)} new questions...")
+                                            # Run analysis for uncached questions
+                                            asyncio.run(run_analysis(
+                                                analyzer=analyzer,
+                                                file_path=str(file_path),
+                                                selected_questions=questions_to_analyze,
+                                                progress_text=progress_text
+                                            ))
+                                        else:
+                                            progress_text.info("Using cached results for all selected questions")
+                                    
+                                    # Get final results
+                                    all_results = analyzer.analyzer.cache_manager.get_analysis(
+                                        file_path=str(file_path),
+                                        config=config,
+                                        question_ids=selected_questions
+                                    )
                                     
                                     # Process all results into dataframes
                                     if all_results:
@@ -1254,6 +1275,10 @@ def main():
                     if 'results' in st.session_state:
                         del st.session_state.results
                     st.success(f"File uploaded successfully: {uploaded_file.name}")
+                    
+                    # Add cache selector for uploaded file
+                    display_cache_selector(file_path)
+                    
                     if not st.session_state.get('file_processed'):
                         st.session_state.file_processed = True
                         st.rerun()
