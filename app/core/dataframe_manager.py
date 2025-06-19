@@ -36,13 +36,14 @@ def extract_evidence_text(evidence: Any) -> str:
         return f"{text} [Chunk {chunk}]"
     return str(evidence)
 
-def create_analysis_dataframes(cached_results: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def create_analysis_dataframes(cached_results: Dict, file_key: str = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Create analysis and chunks dataframes from database results."""
     try:
         analysis_rows = []
         chunks_rows = []
         
-        logger.info(f"Processing {len(cached_results)} results")
+        logger.info(f"Processing {len(cached_results)} results for file_key: {file_key}")
+        logger.info(f"Input cached_results keys: {list(cached_results.keys())}")
         
         # Handle each question's results
         for question_id, data in cached_results.items():
@@ -51,54 +52,36 @@ def create_analysis_dataframes(cached_results: Dict) -> Tuple[pd.DataFrame, pd.D
                 result = data.get('result', data)
                 logger.info(f"Processing question {question_id} with keys: {list(result.keys())}")
                 
-                # Format evidence with chunk numbers and scores
-                evidence_texts = []
-                evidence_list = result.get('EVIDENCE', [])
-                for evidence in evidence_list:
-                    if isinstance(evidence, dict):
-                        text = evidence.get('text', '')  # Use LLM's evidence text
-                        chunk_num = evidence.get('chunk', 'Unknown')
-                        evidence_texts.append(f"{text} [Chunk {chunk_num}]")
-                    else:
-                        evidence_texts.append(str(evidence))
-                
                 # Create analysis row
                 analysis_row = {
                     'Question ID': question_id,
                     'Analysis': result.get('ANSWER', ''),
                     'Score': float(result.get('SCORE', 0)),
-                    'Key Evidence': '\n'.join(evidence_texts) if evidence_texts else '',
-                    'Gaps': '\n'.join(str(gap) for gap in result.get('GAPS', [])) if result.get('GAPS') else '',
-                    'Sources': '\n'.join(str(source) for source in result.get('SOURCES', [])) if result.get('SOURCES') else ''
+                    'Key Evidence': '\n'.join(str(e) for e in result.get('EVIDENCE', [])),
+                    'Gaps': '\n'.join(str(gap) for gap in result.get('GAPS', [])),
+                    'Sources': '\n'.join(str(source) for source in result.get('SOURCES', []))
                 }
                 analysis_rows.append(analysis_row)
                 logger.info(f"Added analysis row for question {question_id}")
                 
-                # Process chunks
+                # Process chunks - use exactly what's in the database
                 chunks = data.get('chunks', [])
                 logger.info(f"Processing {len(chunks)} chunks for question {question_id}")
                 
                 for chunk in chunks:
-                    # Get similarity score safely
-                    similarity_score = chunk.get('similarity_score', chunk.get('score', 0.0))
-                    
-                    # Check if this chunk is referenced in evidence
-                    chunk_num = chunk.get('chunk_order', chunk.get('position', 0))
-                    is_evidence = chunk.get('is_evidence', False) or any(
-                        (isinstance(e, dict) and str(e.get('chunk')) == str(chunk_num))
-                        for e in evidence_list
-                    )
-                    
+                    # Create chunk row with exactly what's in the database
                     chunk_row = {
                         'Question ID': question_id,
-                        'Chunk Text': chunk.get('text', ''),
-                        'Vector Similarity': similarity_score,
-                        'LLM Score': chunk.get('llm_score', 0.0),
-                        'Is Evidence': is_evidence,
-                        'Position': chunk_num
+                        'Chunk Text': chunk['text'],
+                        'Vector Similarity': chunk['similarity_score'],  # Raw value from DB
+                        'LLM Score': chunk.get('llm_score'),  # Raw value from DB
+                        'Is Evidence': chunk.get('is_evidence'),  # Raw value from DB
+                        'Position': chunk.get('chunk_order')  # Raw value from DB
                     }
                     chunks_rows.append(chunk_row)
-                    logger.debug(f"Added chunk row {chunk_num} for {question_id} with similarity {similarity_score:.4f}")
+                    
+                    # Log the exact values we're using
+                    logger.info(f"Raw chunk values - similarity_score: {chunk['similarity_score']}, llm_score: {chunk.get('llm_score')}, is_evidence: {chunk.get('is_evidence')}")
                 
             except Exception as e:
                 logger.error(f"Error processing result for question {question_id}: {str(e)}")
@@ -111,16 +94,11 @@ def create_analysis_dataframes(cached_results: Dict) -> Tuple[pd.DataFrame, pd.D
         
         # Log DataFrame information
         logger.info(f"Created dataframes - Analysis: {len(analysis_df)} rows, Chunks: {len(chunks_df)} rows")
-        if not analysis_df.empty:
-            logger.info(f"Analysis columns: {analysis_df.columns.tolist()}")
-            logger.info(f"Analysis non-empty counts: {analysis_df.count().to_dict()}")
-            logger.info(f"Sample row: {analysis_df.iloc[0].to_dict()}")
-        
         if not chunks_df.empty:
             logger.info(f"Chunks columns: {chunks_df.columns.tolist()}")
-            logger.info(f"Chunks non-empty counts: {chunks_df.count().to_dict()}")
             logger.info(f"Vector similarity range: {chunks_df['Vector Similarity'].min():.4f} - {chunks_df['Vector Similarity'].max():.4f}")
-            logger.info(f"Evidence chunks: {chunks_df['Is Evidence'].sum()}")
+            if 'LLM Score' in chunks_df.columns:
+                logger.info(f"LLM score range: {chunks_df['LLM Score'].min():.4f} - {chunks_df['LLM Score'].max():.4f}")
         
         return analysis_df, chunks_df
         

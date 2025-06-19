@@ -288,12 +288,12 @@ class CacheManager:
                                 chunk_id,
                                 chunk.get('chunk_order', 0),
                                 chunk.get('similarity_score', 0.0),
-                                chunk.get('llm_score', 0.0),
+                                chunk.get('llm_score', None),
                                 chunk.get('is_evidence', False),
                                 chunk.get('evidence_order'),
                                 json.dumps(chunk.get('metadata', {}))
                             ))
-                            logger.debug(f"Saved relevance for chunk {chunk_id}")
+                            logger.info(f"Saving raw values to DB - similarity_score: {chunk.get('similarity_score')}, llm_score: {chunk.get('llm_score')}, is_evidence: {chunk.get('is_evidence')}")
                         else:
                             logger.warning(f"Could not find chunk in document_chunks table")
                 
@@ -386,7 +386,7 @@ class CacheManager:
                 if results:
                     chunk_query = """
                         SELECT 
-                            q.question_id,
+                            ac.question_id,
                             dc.chunk_text,
                             dc.metadata as chunk_metadata,
                             cr.chunk_order,
@@ -395,22 +395,34 @@ class CacheManager:
                             cr.is_evidence,
                             cr.evidence_order,
                             cr.metadata as relevance_metadata
-                        FROM questions q
-                        JOIN question_analysis qa ON qa.question_id = q.id
+                        FROM analysis_cache ac
+                        JOIN questions q ON q.question_id = ac.question_id
+                        JOIN question_analysis qa ON qa.question_id = q.id AND qa.file_path = ac.file_path
                         JOIN chunk_relevance cr ON cr.question_analysis_id = qa.id
                         JOIN document_chunks dc ON cr.document_chunk_id = dc.id
-                        WHERE qa.file_path = ?
-                        AND dc.chunk_size = ?
-                        AND dc.chunk_overlap = ?
-                        AND qa.top_k = ?
-                        AND qa.model = ?
-                        AND q.question_set = ?
-                        AND q.question_id IN ({})
+                        WHERE ac.file_path = ?
+                        AND ac.chunk_size = ?
+                        AND ac.chunk_overlap = ?
+                        AND ac.top_k = ?
+                        AND ac.model = ?
+                        AND ac.question_set = ?
+                        AND ac.question_id IN ({})
+                        ORDER BY ac.question_id, cr.chunk_order
                     """.format(','.join('?' * len(results)))
 
-                    chunk_params = params[:6] + list(results.keys())
+                    chunk_params = [
+                        str(file_path), 
+                        config['chunk_size'], 
+                        config['chunk_overlap'], 
+                        config['top_k'], 
+                        config['model'], 
+                        config['question_set']
+                    ] + list(results.keys())
+                    
+                    logger.info(f"Executing chunk query with params: {chunk_params}")
                     chunk_cursor = conn.execute(chunk_query, chunk_params)
                     chunk_rows = chunk_cursor.fetchall()
+                    logger.info(f"Retrieved {len(chunk_rows)} chunk rows")
 
                     # Add chunks to their respective questions
                     for row in chunk_rows:
@@ -419,17 +431,21 @@ class CacheManager:
                             'text': row[1],
                             'metadata': json.loads(row[2]) if row[2] else {},
                             'chunk_order': row[3],
-                            'similarity_score': row[4],
-                            'llm_score': row[5],
-                            'is_evidence': bool(row[6]),
+                            'similarity_score': row[4],  # Raw similarity score from DB
+                            'llm_score': row[5],  # Raw LLM score from DB
+                            'is_evidence': row[6],  # Raw is_evidence from DB
                             'evidence_order': row[7],
                             'relevance_metadata': json.loads(row[8]) if row[8] else {}
                         }
+                        logger.info(f"Raw DB values for chunk - similarity_score: {row[4]}, llm_score: {row[5]}, is_evidence: {row[6]}")
                         results[question_id]['chunks'].append(chunk_info)
 
                     # Sort chunks by their order
                     for question_id in results:
                         results[question_id]['chunks'].sort(key=lambda x: x['chunk_order'])
+                        logger.info(f"Question {question_id}: {len(results[question_id]['chunks'])} chunks")
+                        if results[question_id]['chunks']:
+                            logger.info(f"  Similarity range: {min(c['similarity_score'] for c in results[question_id]['chunks']):.4f} - {max(c['similarity_score'] for c in results[question_id]['chunks']):.4f}")
 
                 return results
 

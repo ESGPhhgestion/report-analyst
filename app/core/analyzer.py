@@ -21,13 +21,13 @@ from langchain.prompts import PromptTemplate
 from langchain.chains.summarize import load_summarize_chain
 from llama_index.readers.file import PyMuPDFReader
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.llms.openai import OpenAI
 from llama_index.core.ingestion import IngestionCache
 from llama_index.core.llms import ChatMessage, MessageRole
 
 from .prompt_manager import PromptManager
 from .storage import LlamaVectorStore
 from .cache_manager import CacheManager
+from .llm_providers import get_llm
 import numpy as np
 
 # Setup logging at the top of the file
@@ -37,13 +37,38 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Check for required environment variables
-if not os.getenv("OPENAI_API_KEY"):
-    logger.error("OPENAI_API_KEY environment variable is not set")
-    raise ValueError("OPENAI_API_KEY environment variable is required")
+openai_key = os.getenv("OPENAI_API_KEY")
+gemini_key = os.getenv("GOOGLE_API_KEY")
+default_model = os.getenv("OPENAI_API_MODEL", "gpt-3.5-turbo-1106")
+
+# Log available model keys
+logger.info(f"API Keys available - OpenAI: {bool(openai_key)}, Gemini: {bool(gemini_key)}")
+
+# Check if we need to force the default model based on available keys
+if default_model.startswith("gemini-") and not gemini_key:
+    logger.warning(f"Default model is {default_model} but no GOOGLE_API_KEY is available")
+    if openai_key:
+        default_model = "gpt-3.5-turbo-1106"
+        logger.info(f"Switching default model to {default_model}")
+    else:
+        logger.error("No valid API keys available for any models")
+        raise ValueError("No valid API keys found. Set either OPENAI_API_KEY or GOOGLE_API_KEY")
+elif default_model.startswith("gpt-") and not openai_key:
+    logger.warning(f"Default model is {default_model} but no OPENAI_API_KEY is available")
+    if gemini_key:
+        default_model = "gemini-pro"
+        logger.info(f"Switching default model to {default_model}")
+    else:
+        logger.error("No valid API keys available for any models")
+        raise ValueError("No valid API keys found. Set either OPENAI_API_KEY or GOOGLE_API_KEY")
+
+# Ensure we have at least one API key for the selected model type
+if not openai_key and not gemini_key:
+    logger.error("No API keys found - set either OPENAI_API_KEY or GOOGLE_API_KEY")
+    raise ValueError("Set either OPENAI_API_KEY or GOOGLE_API_KEY environment variable")
 
 if not os.getenv("OPENAI_ORGANIZATION"):
-    logger.error("OPENAI_ORGANIZATION environment variable is not set")
-    raise ValueError("OPENAI_ORGANIZATION environment variable is required")
+    logger.warning("OPENAI_ORGANIZATION environment variable is not set")
 
 def log_analysis_step(message: str, level: str = "info"):
     """Helper function to log analysis steps with consistent formatting"""
@@ -95,28 +120,30 @@ class DocumentAnalyzer:
         self.questions = self._load_questions()
         
         # Use model from environment variables as default
-        self.default_model = os.getenv("OPENAI_API_MODEL", "gpt-3.5-turbo-1106")
+        self.default_model = default_model
         log_analysis_step(f"Using default model from env: {self.default_model}")
         
         try:
-            # Initialize LLM with caching
-            self.llm = OpenAI(
-                model=self.default_model,
-                api_key=os.getenv("OPENAI_API_KEY"),
-                api_base=os.getenv("OPENAI_API_BASE"),
+            # Initialize LLM with caching using the provider factory
+            self.llm = get_llm(
+                model_name=self.default_model,
                 cache_dir=str(self.llm_cache_path),
             )
             
-            # Initialize embeddings
-            self.embeddings = OpenAIEmbedding(
-                api_key=os.getenv('OPENAI_API_KEY'),
-                api_base=os.getenv('OPENAI_API_BASE'),
-                model_name=os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-ada-002'),
-                embed_batch_size=100
-            )
-            
-            # Configure embeddings globally for LlamaIndex
-            Settings.embed_model = self.embeddings
+            # Initialize embeddings if OpenAI API key is available
+            if openai_key:
+                self.embeddings = OpenAIEmbedding(
+                    api_key=openai_key,
+                    api_base=os.getenv('OPENAI_API_BASE'),
+                    model_name=os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-ada-002'),
+                    embed_batch_size=100
+                )
+                
+                # Configure embeddings globally for LlamaIndex
+                Settings.embed_model = self.embeddings
+            else:
+                logger.warning("No OpenAI API key - embedding functionality will be limited")
+                # TODO: Add fallback embedding model (e.g. HuggingFace) if needed
             
             # Initialize caching
             self.use_cache = True  # Default to True, can be overridden
@@ -498,7 +525,41 @@ Output only the scores, one per line, in order:""")
                     )
                     logger.info(f"[ANALYSIS] Found {len(similar_chunks)} similar chunks")
                     
-                    # 4. Run LLM analysis
+                    # 3.5. Apply LLM scoring to chunks if enabled (INDEPENDENT of evidence determination)
+                    if use_llm_scoring:
+                        logger.info(f"[ANALYSIS] Applying LLM scoring to {len(similar_chunks)} chunks for question {question_id}")
+                        yield {"status": f"Scoring chunks with LLM for question {question_number}..."}
+                        
+                        try:
+                            llm_scores = await self.score_chunk_relevance_batch(
+                                question_data['text'],
+                                similar_chunks,
+                                single_call=single_call
+                            )
+                            
+                            # Apply LLM scores to chunks
+                            for i, chunk in enumerate(similar_chunks):
+                                if i < len(llm_scores):
+                                    chunk['llm_score'] = llm_scores[i]
+                                    logger.debug(f"Applied LLM score {llm_scores[i]:.3f} to chunk {i+1}")
+                                else:
+                                    chunk['llm_score'] = 0.0
+                                    logger.warning(f"No LLM score available for chunk {i+1}")
+                            
+                            logger.info(f"[ANALYSIS] Applied LLM scores to {len(similar_chunks)} chunks")
+                            
+                        except Exception as e:
+                            logger.error(f"[ANALYSIS] Error applying LLM scores: {str(e)}", exc_info=True)
+                            # Set default scores if LLM scoring fails
+                            for chunk in similar_chunks:
+                                chunk['llm_score'] = 0.0
+                    else:
+                        logger.info(f"[ANALYSIS] LLM scoring disabled for question {question_id}")
+                        # Ensure llm_score is set to None when not using LLM scoring
+                        for chunk in similar_chunks:
+                            chunk['llm_score'] = None
+                    
+                    # 4. Run LLM analysis (evidence determination happens here)
                     logger.info(f"[ANALYSIS] Running LLM analysis for question {question_id}")
                     result = await self._analyze_chunks(
                         question_data,
@@ -518,11 +579,10 @@ Output only the scores, one per line, in order:""")
                                 if chunk_num is not None:
                                     chunk_idx = chunk_num - 1  # Convert to 0-based index
                                     if 0 <= chunk_idx < len(similar_chunks):
-                                        # Update chunk information
+                                        # Update chunk information - ONLY set evidence flags, NOT llm_score
                                         similar_chunks[chunk_idx].update({
                                             'is_evidence': True,
-                                            'evidence_order': evidence_idx + 1,
-                                            'llm_score': evidence.get('score', 1.0)
+                                            'evidence_order': evidence_idx + 1
                                         })
                                         # Add evidence item with chunk reference and preserve LLM's evidence text
                                         evidence_items.append({
@@ -691,19 +751,23 @@ Output only the scores, one per line, in order:""")
                 logger.debug(f"Processing chunk {i+1}/{len(chunks)}")
                 # Get similarity score from either 'score' (from vector store) or 'similarity_score' (from cache)
                 similarity_score = chunk.get('score', chunk.get('similarity_score', 0.0))
+                
+                # Get LLM score if it exists (independent of evidence)
+                llm_score = chunk.get('llm_score', None)
+                
                 chunk_data = {
                     'id': chunk.get('id'),
                     'text': chunk['text'],
                     'chunk_order': i,
                     'similarity_score': similarity_score,
-                    'llm_score': 0.0,
+                    'llm_score': llm_score,  # Use existing LLM score if available
                     'is_evidence': False,
                     'evidence_order': None,
                     'metadata': chunk.get('metadata', {}),
                     'relevance_metadata': {}
                 }
                 processed_chunks.append(chunk_data)
-                logger.debug(f"Processed chunk with similarity score: {similarity_score:.4f}")
+                logger.debug(f"Processed chunk with similarity score: {similarity_score:.4f}, llm_score: {llm_score}")
                 
             # Create analysis prompt with indexed chunks
             messages = self.prompt_manager.get_analysis_messages(
@@ -787,11 +851,10 @@ Output only the scores, one per line, in order:""")
                         if chunk_num is not None:
                             chunk_idx = chunk_num - 1  # Convert to 0-based index
                             if 0 <= chunk_idx < len(processed_chunks):
-                                # Update chunk information
+                                # Update chunk information - ONLY set evidence flags, NOT llm_score
                                 processed_chunks[chunk_idx].update({
                                     'is_evidence': True,
-                                    'evidence_order': evidence_idx + 1,
-                                    'llm_score': evidence.get('score', 1.0)
+                                    'evidence_order': evidence_idx + 1
                                 })
                                 # Add evidence item with chunk reference and preserve LLM's evidence text
                                 evidence_items.append({
@@ -908,11 +971,9 @@ Output only the scores, one per line, in order:""")
         """Update the LLM model."""
         log_analysis_step(f"Updating LLM model to: {model_name}")
         
-        # Initialize LLM with caching
-        self.llm = OpenAI(
-            model=model_name,
-            api_key=os.getenv("OPENAI_API_KEY"),
-            api_base=os.getenv("OPENAI_API_BASE"),
+        # Initialize LLM with caching using the provider factory
+        self.llm = get_llm(
+            model_name=model_name,
             cache_dir=str(self.llm_cache_path),
         )
 

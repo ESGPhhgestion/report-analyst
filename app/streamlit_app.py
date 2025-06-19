@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import os
 import json
-import yaml
 import asyncio
 import logging
 from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple
@@ -49,16 +48,37 @@ logger.info(f"Added {current_dir} to Python path")
 from app.core.analyzer import DocumentAnalyzer
 from app.core.prompt_manager import PromptManager
 from app.core.dataframe_manager import create_analysis_dataframes, create_combined_dataframe
+from app.core.question_loader import get_question_loader
 
 # Load environment variables
 load_dotenv()
 logger.info("Loaded environment variables")
 
-LLM_MODELS = [
+# Initialize question loader
+question_loader = get_question_loader()
+
+# Define model lists based on available API keys
+OPENAI_MODELS = [
     "gpt-4o-mini",
     "gpt-4o",
-    "gpt-3.5-turbo",
+    "gpt-4-turbo",
+    "gpt-3.5-turbo"
 ]
+
+GEMINI_MODELS = [
+    "gemini-1.5-flash",
+    "gemini-1.5-pro"
+]
+
+# Only include models with available API keys
+LLM_MODELS = OPENAI_MODELS.copy()
+
+# Check for Google API key and add Gemini models if available
+if os.getenv("GOOGLE_API_KEY"):
+    logger.info("Google API key found - adding Gemini models to available options")
+    LLM_MODELS.extend(GEMINI_MODELS)
+else:
+    logger.warning("No Google API key found - Gemini models will not be available")
 
 question_sets = {
     "tcfd": {
@@ -89,27 +109,35 @@ class ReportAnalyzer:
         self.cache_manager = self.analyzer.cache_manager  # Access the cache manager from the analyzer
         
     def load_question_set(self, question_set: str) -> Dict:
-        """Load questions from the specified question set file"""
-        question_file = Path(__file__).parent / "questionsets" / f"{question_set}_questions.yaml"
+        """Load questions from the specified question set using centralized loader"""
         try:
-            with open(question_file, 'r') as f:
-                data = yaml.safe_load(f)
-                # Create questions with proper IDs
-                questions = {}
-                for i, q in enumerate(data['questions'], 1):  # Start from 1
-                    q_id = f"{question_set}_{i}"
-                    questions[q_id] = q
-                    # Add the ID to the question data for reference
-                    q['id'] = q_id
-                    # Add numeric ID for easier mapping
-                    q['number'] = i
+            question_set_obj = question_loader.get_question_set(question_set)
+            if not question_set_obj:
+                logger.error(f"Question set '{question_set}' not found")
                 return {
-                    "questions": questions,
-                    "name": data.get('name', f"{question_set.upper()} Questions"),
-                    "description": data.get('description', '')
+                    "questions": {},
+                    "name": "",
+                    "description": ""
                 }
+            
+            # Convert to the format expected by the UI
+            questions = {}
+            for i, (q_id, q_data) in enumerate(question_set_obj.questions.items(), 1):
+                questions[q_id] = {
+                    'text': q_data['text'],
+                    'guidelines': q_data.get('guidelines', ''),
+                    'id': q_id,
+                    'number': i  # Add numeric ID for easier mapping
+                }
+            
+            return {
+                "questions": questions,
+                "name": question_set_obj.name,
+                "description": question_set_obj.description
+            }
+            
         except Exception as e:
-            logger.error(f"Failed to load questions from {question_file}: {str(e)}")
+            logger.error(f"Failed to load questions for {question_set}: {str(e)}")
             return {
                 "questions": {},
                 "name": "",
@@ -346,6 +374,8 @@ async def analyze_document_and_display(report_analyzer, file_path: str, question
                 st.session_state.results["answers"][q_id] = answer
             
             # Update display with cached results
+            logger.info(f"Creating dataframes with cached results for file_key: {file_key}")
+            logger.info(f"Current session state settings: chunk_size={st.session_state.get('new_chunk_size')}, overlap={st.session_state.get('new_overlap')}, top_k={st.session_state.get('new_top_k')}, llm_model={st.session_state.get('new_llm_model')}, use_llm_scoring={st.session_state.get('new_llm_scoring')}")
             analysis_df, chunks_df = create_analysis_dataframes(
                 st.session_state.results["answers"], 
                 file_key
@@ -393,6 +423,8 @@ async def analyze_document_and_display(report_analyzer, file_path: str, question
                 st.session_state.results["answers"][question_id] = result
                 
                 # Update display
+                logger.info(f"Creating dataframes with updated results for file_key: {file_key}")
+                logger.info(f"Current session state settings: chunk_size={st.session_state.get('new_chunk_size')}, overlap={st.session_state.get('new_overlap')}, top_k={st.session_state.get('new_top_k')}, llm_model={st.session_state.get('new_llm_model')}, use_llm_scoring={st.session_state.get('new_llm_scoring')}")
                 analysis_df, chunks_df = create_analysis_dataframes(
                     st.session_state.results["answers"], 
                     file_key
@@ -570,24 +602,12 @@ def display_final_results(analysis_df: pd.DataFrame, chunks_df: pd.DataFrame):
     )
 
 def load_question_sets() -> Dict[str, str]:
-    """Load all available question sets and their descriptions"""
-    question_sets = {}
-    question_sets_dir = Path(__file__).parent / "questionsets"
-    
-    for yaml_file in question_sets_dir.glob("*_questions.yaml"):
-        try:
-            with open(yaml_file, 'r') as f:
-                data = yaml.safe_load(f)
-                # Get set name from filename (e.g., 'tcfd' from 'tcfd_questions.yaml')
-                set_id = yaml_file.stem.replace('_questions', '')
-                question_sets[set_id] = {
-                    'name': data.get('name', set_id.upper()),
-                    'description': data.get('description', '')
-                }
-        except Exception as e:
-            logger.error(f"Error loading question set {yaml_file}: {e}")
-    
-    return question_sets
+    """Load all available question sets and their descriptions using centralized loader"""
+    try:
+        return question_loader.get_question_set_info()
+    except Exception as e:
+        logger.error(f"Error loading question sets: {e}")
+        return {}
 
 def get_uploaded_files_history() -> List[Dict]:
     """Get list of previously uploaded files from temp directory"""
@@ -634,10 +654,7 @@ def display_analysis_results(analysis_df: pd.DataFrame, chunks_df: pd.DataFrame,
                 ),
                 "Score": st.column_config.NumberColumn(
                     "Score",
-                    min_value=0,
-                    max_value=10,
                     format="%.1f",
-                    width="small",
                 ),
                 "Key Evidence": st.column_config.TextColumn(
                     "Key Evidence",
@@ -658,7 +675,7 @@ def display_analysis_results(analysis_df: pd.DataFrame, chunks_df: pd.DataFrame,
         if not chunks_df.empty:
             st.subheader("Document Chunks")
             st.dataframe(
-                data=filter_dataframe(chunks_df),
+                data=chunks_df,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -672,17 +689,13 @@ def display_analysis_results(analysis_df: pd.DataFrame, chunks_df: pd.DataFrame,
                     ),
                     "Vector Similarity": st.column_config.NumberColumn(
                         "Vector Similarity",
-                        min_value=0,
-                        max_value=1,
-                        format="%.3f",
+                        format="%.4f",  # Show raw value with 4 decimal places
                     ),
                     "LLM Score": st.column_config.NumberColumn(
                         "LLM Score",
-                        min_value=0,
-                        max_value=1,
-                        format="%.3f",
+                        format="%.4f",  # Show raw value with 4 decimal places
                     ),
-                    "Evidence Reference": st.column_config.CheckboxColumn(
+                    "Is Evidence": st.column_config.CheckboxColumn(
                         "Is Evidence",
                     ),
                     "Position": st.column_config.NumberColumn(
@@ -812,7 +825,7 @@ def display_consolidated_results(analyzer, question_set):
                                     chunk_row = {
                                         'Question ID': question_id,
                                         'Text': chunk.get('text', ''),
-                                        'Vector Similarity': chunk.get('similarity', 0.0),
+                                        'Vector Similarity': chunk.get('similarity_score', 0.0),
                                         'LLM Score': chunk.get('llm_score', 0.0),
                                         'Is Evidence': chunk.get('is_evidence', False),
                                         'Position': chunk.get('chunk_order', 0)
@@ -892,6 +905,10 @@ def get_current_settings(st) -> dict:
     # Get first question set as default
     default_set = list(question_sets.keys())[0]
     
+    # Ensure LLM scoring setting is synced
+    if 'new_llm_scoring' in st.session_state:
+        st.session_state.use_llm_scoring = st.session_state.new_llm_scoring
+    
     return {
         'chunk_size': st.session_state.get('new_chunk_size', 500),
         'overlap': st.session_state.get('new_overlap', 20),
@@ -903,29 +920,51 @@ def get_current_settings(st) -> dict:
     }
 
 def update_analyzer_parameters():
-    """Update analyzer parameters based on current session state"""
-    if 'analyzer' in st.session_state:
-        # Log current values before update
-        logger.info(f"Updating analyzer parameters:")
-        logger.info(f"- Chunk size: {st.session_state.new_chunk_size}")
-        logger.info(f"- Overlap: {st.session_state.new_overlap}")
-        logger.info(f"- Top K: {st.session_state.new_top_k}")
-        logger.info(f"- Model: {st.session_state.new_llm_model}")
+    """Update analyzer parameters based on session state."""
+    if 'analyzer' not in st.session_state:
+        return
+
+    analyzer = st.session_state.analyzer
+    
+    # Get the current parameters from session state
+    chunk_size = st.session_state.new_chunk_size
+    chunk_overlap = st.session_state.new_overlap
+    top_k = st.session_state.new_top_k
+    llm_model = st.session_state.new_llm_model
+    
+    # Validate selected model availability
+    if llm_model.startswith("gemini-") and not os.getenv("GOOGLE_API_KEY"):
+        # If somehow a Gemini model was selected but no API key exists
+        logger.error(f"Attempt to use Gemini model '{llm_model}' without API key")
+        st.error(f"⚠️ Cannot use {llm_model} - No Google API key is set. Defaulting to {OPENAI_MODELS[0]}.")
+        # Reset to default OpenAI model
+        llm_model = OPENAI_MODELS[0]
+        st.session_state.new_llm_model = llm_model
+    elif llm_model.startswith("gpt-") and not os.getenv("OPENAI_API_KEY"):
+        logger.error(f"Attempt to use OpenAI model '{llm_model}' without API key")
+        st.error(f"⚠️ OPENAI_API_KEY environment variable is not set. OpenAI models will not work correctly.")
+    
+    # Update the analyzer with the new parameters
+    try:
+        # Update the chunk size and chunk overlap first
+        analyzer.analyzer.update_parameters(chunk_size, chunk_overlap, top_k)
         
-        # Update analyzer parameters
-        st.session_state.analyzer.analyzer.update_parameters(
-            chunk_size=st.session_state.new_chunk_size,
-            chunk_overlap=st.session_state.new_overlap,
-            top_k=st.session_state.new_top_k
-        )
-        st.session_state.analyzer.analyzer.update_llm_model(st.session_state.new_llm_model)
+        # Update the LLM model name
+        analyzer.analyzer.update_llm_model(llm_model)
         
-        # Log updated values to verify
-        logger.info("Updated analyzer parameters:")
-        logger.info(f"- Chunk size: {st.session_state.analyzer.analyzer.chunk_params['chunk_size']}")
-        logger.info(f"- Overlap: {st.session_state.analyzer.analyzer.chunk_params['chunk_overlap']}")
-        logger.info(f"- Top K: {st.session_state.analyzer.analyzer.chunk_params['top_k']}")
-        logger.info(f"- Model: {st.session_state.analyzer.analyzer.llm.model}")
+        # Store parameters in session state
+        st.session_state.chunk_size = chunk_size
+        st.session_state.chunk_overlap = chunk_overlap
+        st.session_state.top_k = top_k
+        st.session_state.llm_model = llm_model
+        
+        # Sync LLM scoring checkbox with session state
+        if 'new_llm_scoring' in st.session_state:
+            st.session_state.use_llm_scoring = st.session_state.new_llm_scoring
+            logger.info(f"Updated use_llm_scoring to: {st.session_state.use_llm_scoring}")
+            
+    except Exception as e:
+        st.error(f"Error updating parameters: {str(e)}")
 
 async def run_analysis(analyzer, file_path, selected_questions, progress_text):
     """Run analysis and update the UI with progress"""
@@ -938,21 +977,33 @@ async def run_analysis(analyzer, file_path, selected_questions, progress_text):
             'model': st.session_state.llm_model,
             'question_set': st.session_state.question_set
         }
-        
+        logger.info(f"[ANALYSIS] User triggered analysis for file: {file_path}")
+        logger.info(f"[ANALYSIS] Selected questions: {selected_questions}")
+        if 'questions' in st.session_state:
+            logger.info(f"[ANALYSIS] Selected question texts: {[st.session_state.questions[q]['text'] for q in selected_questions if q in st.session_state.questions]}")
+        logger.info(f"[CACHE] Looking up cache for file: {file_path} with config: {config} and questions: {selected_questions}")
         # Check if we have cached results first
         cached_results = analyzer.cache_manager.get_analysis(
             file_path=file_path,
             config=config,
             question_ids=[f"{config['question_set']}_{q}" for q in selected_questions]
         )
-        
         if cached_results and not st.session_state.get('force_recompute', False):
+            logger.info(f"[CACHE] Cache HIT for config: {config}")
             progress_text.success("Found cached results!")
             st.session_state.results = cached_results
+            logger.info(f"[ANALYSIS] Writing results to session state for file: {file_path}")
+            logger.info(f"[ANALYSIS] Attempting to display results for file: {file_path}")
             return
-            
+        else:
+            logger.info(f"[CACHE] Cache MISS for config: {config}")
         # If no cached results or force recompute, run analysis
         progress_text.info("Starting analysis...")
+        
+        # Log the LLM scoring setting
+        llm_scoring_enabled = st.session_state.get('new_llm_scoring', False)
+        progress_text.info(f"LLM scoring: {'Enabled' if llm_scoring_enabled else 'Disabled'}")
+        logger.info(f"Starting analysis with LLM scoring: {llm_scoring_enabled}")
         
         # Track results
         all_results = {}
@@ -974,7 +1025,7 @@ async def run_analysis(analyzer, file_path, selected_questions, progress_text):
         async for result in analyzer.process_document(
             file_path=file_path,
             selected_questions=question_numbers,  # Pass just the numbers
-            use_llm_scoring=st.session_state.get('use_llm_scoring', False),
+            use_llm_scoring=st.session_state.get('new_llm_scoring', False),  # Use the checkbox value directly
             force_recompute=st.session_state.get('force_recompute', False)
         ):
             # Handle errors by displaying them but not storing them
@@ -1015,7 +1066,10 @@ async def run_analysis(analyzer, file_path, selected_questions, progress_text):
             # If no results from cache, use the ones we just processed
             final_results = all_results
             
+        # When writing results to session state
+        logger.info(f"[ANALYSIS] Writing results to session state for file: {file_path}")
         st.session_state.results = final_results
+        logger.info(f"[ANALYSIS] Attempting to display results for file: {file_path}")
         progress_text.success("Analysis complete!")
         
     except Exception as e:
@@ -1050,7 +1104,14 @@ def main():
         if "results" not in st.session_state:
             st.session_state.results = {}  # Initialize empty results
             
-        # Rest of the main function...
+        if "current_file" not in st.session_state:
+            st.session_state.current_file = None  # Initialize current file
+            
+        if "file_processed" not in st.session_state:
+            st.session_state.file_processed = False  # Initialize file processed flag
+            
+        if "analysis_complete" not in st.session_state:
+            st.session_state.analysis_complete = False  # Initialize analysis complete flag
 
         st.set_page_config(page_title="Report Analyst", layout="wide")
         
@@ -1100,10 +1161,32 @@ def main():
             # LLM settings
             col1, col2, col3 = st.columns(3)
             with col1:
-                new_llm_scoring = st.checkbox("Use LLM Scoring", value=False, key="new_llm_scoring")
+                new_llm_scoring = st.checkbox("Use LLM Scoring", value=False, key="new_llm_scoring", on_change=update_analyzer_parameters)
             with col2:
-                new_batch_scoring = st.checkbox("Batch Scoring", value=True, key="new_batch_scoring")
+                new_batch_scoring = st.checkbox(
+                    "Batch Scoring", 
+                    value=True, 
+                    key="new_batch_scoring",
+                    disabled=not st.session_state.get('new_llm_scoring', False),
+                    help="Batch scoring only applies when LLM scoring is enabled. When enabled, all chunks are scored in one API call instead of individual calls."
+                )
             with col3:
+                # Display available API info
+                api_info = []
+                if os.getenv("OPENAI_API_KEY"):
+                    api_info.append("OpenAI")
+                if os.getenv("GOOGLE_API_KEY"):
+                    api_info.append("Gemini")
+                
+                if len(api_info) > 1:
+                    api_status = f"Using {' & '.join(api_info)} models"
+                elif len(api_info) == 1:
+                    api_status = f"Using {api_info[0]} models only"
+                else:
+                    api_status = "No API keys configured"
+                    
+                st.caption(api_status)
+                    
                 new_llm_model = st.selectbox(
                     "LLM Model", 
                     options=LLM_MODELS,
@@ -1213,7 +1296,7 @@ def main():
                                         # For reanalysis, skip cache check and analyze all selected questions
                                         progress_text.info(f"Reanalyzing {len(selected_questions)} questions...")
                                         asyncio.run(run_analysis(
-                                            analyzer=analyzer,
+                                            analyzer,
                                             file_path=str(file_path),
                                             selected_questions=selected_questions,
                                             progress_text=progress_text
@@ -1226,37 +1309,58 @@ def main():
                                             question_ids=selected_questions
                                         )
                                         
-                                        # Determine which questions need analysis
-                                        cached_questions = set(cached_results.keys() if cached_results else set())
-                                        questions_to_analyze = [q for q in selected_questions if q not in cached_questions]
-                                        
-                                        if questions_to_analyze:
-                                            progress_text.info(f"Analyzing {len(questions_to_analyze)} new questions...")
-                                            # Run analysis for uncached questions
-                                            asyncio.run(run_analysis(
-                                                analyzer=analyzer,
-                                                file_path=str(file_path),
-                                                selected_questions=questions_to_analyze,
-                                                progress_text=progress_text
-                                            ))
+                                        if cached_results:
+                                            # Process cached results
+                                            for question_id, result in cached_results.items():
+                                                st.session_state.results["answers"][question_id] = result
+                                            
+                                            # Generate file key for display
+                                            file_key = generate_file_key(str(file_path), st)
+                                            
+                                            # Update display
+                                            analysis_df, chunks_df = create_analysis_dataframes(
+                                                st.session_state.results["answers"], 
+                                                file_key
+                                            )
+                                            st.session_state.analysis_df = analysis_df
+                                            st.session_state.chunks_df = chunks_df
+                                            st.session_state.analysis_complete = True
                                         else:
-                                            progress_text.info("Using cached results for all selected questions")
-                                    
-                                    # Get final results
-                                    all_results = analyzer.analyzer.cache_manager.get_analysis(
-                                        file_path=str(file_path),
-                                        config=config,
-                                        question_ids=selected_questions
-                                    )
-                                    
-                                    # Process all results into dataframes
-                                    if all_results:
-                                        analysis_df, chunks_df = create_analysis_dataframes(all_results)
-                                        file_key = Path(file_path).stem
-                                        display_analysis_results(analysis_df, chunks_df, file_key)
-                                        progress_text.success(f"✓ Analysis complete for {len(selected_questions)} questions")
-                                    else:
-                                        progress_text.error("No results found after analysis")
+                                            # Run analysis for uncached questions
+                                            progress_text.info(f"Processing {len(selected_questions)} questions...")
+                                            
+                                            try:
+                                                # Run analysis for uncached questions
+                                                asyncio.run(analyze_document_and_display(
+                                                    analyzer,
+                                                    file_path=str(file_path),  # Use the actual file path
+                                                    questions=questions,
+                                                    selected_questions=selected_questions,
+                                                    use_llm_scoring=st.session_state.new_llm_scoring,
+                                                    single_call=st.session_state.new_batch_scoring
+                                                ))
+                                                
+                                                progress_text.success("Analysis complete!")
+                                                
+                                            except Exception as e:
+                                                st.error(f"Error during analysis: {str(e)}")
+                                                st.exception(e)
+                                        
+                                        # Get final results
+                                        all_results = analyzer.analyzer.cache_manager.get_analysis(
+                                            file_path=str(file_path),
+                                            config=config,
+                                            question_ids=selected_questions
+                                        )
+                                        
+                                        # Process all results into dataframes
+                                        if all_results:
+                                            analysis_df, chunks_df = create_analysis_dataframes(all_results)
+                                            file_key = Path(file_path).stem
+                                            display_analysis_results(analysis_df, chunks_df, file_key)
+                                            progress_text.success(f"✓ Analysis complete for {len(selected_questions)} questions")
+                                        else:
+                                            progress_text.error("No results found after analysis")
                                         
                                 except Exception as e:
                                     logger.error(f"Error during analysis: {str(e)}", exc_info=True)
@@ -1271,6 +1375,7 @@ def main():
             uploaded_file = st.file_uploader("Choose a PDF file", type="pdf", key="file_uploader")
             if uploaded_file:
                 file_path = save_uploaded_file(uploaded_file)
+                logger.info(f"[UPLOAD] Saved uploaded file: {uploaded_file.name} at {file_path}")
                 if file_path and file_path != st.session_state.get('current_file'):
                     st.session_state.current_file = file_path
                     st.session_state.uploaded_file = uploaded_file
@@ -1278,11 +1383,10 @@ def main():
                     st.session_state.analysis_triggered = False
                     if 'results' in st.session_state:
                         del st.session_state.results
+                    logger.info(f"[UPLOAD] Added file to session state: {uploaded_file.name}")
                     st.success(f"File uploaded successfully: {uploaded_file.name}")
-                    
-                    # Add cache selector for uploaded file
+                    logger.info(f"[UPLOAD] Displaying cache selector for file: {file_path}")
                     display_cache_selector(file_path)
-                    
                     if not st.session_state.get('file_processed'):
                         st.session_state.file_processed = True
                         st.rerun()
