@@ -1,239 +1,243 @@
 """
-Report Analyst FastAPI Application
+Report Analyst API
 
-This module provides REST API endpoints for the report analyst functionality.
-Can be deployed independently and integrates with the core report analyst package.
+FastAPI application for document analysis.
 """
 
-from fastapi import FastAPI, HTTPException, Depends
-from typing import List, Dict, Any, Optional
-import logging
 import os
+import logging
+from typing import List, Dict, Any, Optional
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import tempfile
+import shutil
 
-# Import from core package
-try:
-    from report_analyst.core.plugins import discover_document_sources, get_available_integrations
-    from report_analyst.core.question_loader import get_question_loader
-    from report_analyst.core.analyzer import DocumentAnalyzer
-except ImportError as e:
-    raise ImportError(f"Core report_analyst package not found: {e}")
+# Add the parent directory to the path to import from report_analyst
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from .schemas import (
+from report_analyst.core.analyzer import DocumentAnalyzer
+from report_analyst.core.question_loader import get_question_loader
+from report_analyst_api.schemas import (
     AnalysisRequest, 
-    AnalysisJob, 
-    DocumentUpload,
-    QuestionSetResponse,
-    IntegrationsResponse
+    AnalysisResponse, 
+    QuestionSet, 
+    HealthResponse
 )
 
-# Setup logging
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create FastAPI app
 app = FastAPI(
     title="Report Analyst API",
-    description="REST API for document analysis using question-based frameworks",
+    description="Document analysis API with multiple question frameworks",
     version="0.1.0"
 )
 
-# Global state
-_document_sources = None
-_question_loader = None
-_analyzer = None
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def get_document_sources():
-    """Get available document sources"""
-    global _document_sources
-    if _document_sources is None:
-        _document_sources = discover_document_sources()
-    return _document_sources
-
-def get_question_loader():
-    """Get question loader instance"""
-    global _question_loader
-    if _question_loader is None:
-        from report_analyst.core.question_loader import get_question_loader
-        _question_loader = get_question_loader()
-    return _question_loader
+# Global analyzer instance
+analyzer = None
 
 def get_analyzer():
-    """Get analyzer instance"""
-    global _analyzer
-    if _analyzer is None:
-        _analyzer = DocumentAnalyzer()
-    return _analyzer
+    """Get or create the document analyzer instance"""
+    global analyzer
+    if analyzer is None:
+        analyzer = DocumentAnalyzer()
+    return analyzer
 
-@app.get("/", response_model=Dict[str, Any])
-async def root():
-    """API root endpoint with basic information"""
-    integrations = get_available_integrations()
-    return {
-        "name": "Report Analyst API",
-        "version": "0.1.0",
-        "description": "REST API for document analysis using question-based frameworks",
-        "available_integrations": integrations,
-        "endpoints": {
-            "upload": "/upload",
-            "question_sets": "/question-sets",
-            "analyze": "/analyze",
-            "health": "/health"
-        }
-    }
+@app.on_event("startup")
+async def startup_event():
+    """Initialize the application"""
+    logger.info("Starting Report Analyst API")
+    # Initialize analyzer
+    get_analyzer()
 
-@app.post("/upload", response_model=Dict[str, str])
-async def upload_document(upload: DocumentUpload):
-    """
-    Upload a document for analysis.
-    
-    Uses the configured document source (local or search backend).
-    """
-    try:
-        sources = get_document_sources()
-        
-        # Determine which source to use
-        source_type = upload.source_type or "local"
-        if source_type not in sources:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Document source '{source_type}' not available. Available: {list(sources.keys())}"
-            )
-        
-        source = sources[source_type]()
-        document_id = await source.upload_document(upload.file_path)
-        
-        return {
-            "document_id": document_id,
-            "source_type": source_type,
-            "status": "uploaded"
-        }
-        
-    except Exception as e:
-        logger.error(f"Upload failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/question-sets", response_model=QuestionSetResponse)
-async def get_question_sets():
-    """Get all available question sets"""
-    try:
-        question_loader = get_question_loader()
-        question_sets = {}
-        
-        # Get all available question sets
-        for set_id in ["tcfd", "s4m", "lucia"]:  # Add more as needed
-            question_set = question_loader.get_question_set(set_id)
-            if question_set:
-                question_sets[set_id] = {
-                    "id": set_id,
-                    "name": question_set.name,
-                    "description": question_set.description,
-                    "questions": question_set.questions
-                }
-        
-        return QuestionSetResponse(question_sets=question_sets)
-        
-    except Exception as e:
-        logger.error(f"Failed to get question sets: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/question-sets/{set_id}", response_model=Dict[str, Any])
-async def get_question_set(set_id: str):
-    """Get a specific question set"""
-    try:
-        question_loader = get_question_loader()
-        question_set = question_loader.get_question_set(set_id)
-        
-        if not question_set:
-            raise HTTPException(status_code=404, detail=f"Question set '{set_id}' not found")
-        
-        return {
-            "id": set_id,
-            "name": question_set.name,
-            "description": question_set.description,
-            "questions": question_set.questions
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get question set {set_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/analyze", response_model=AnalysisJob)
-async def analyze_document(request: AnalysisRequest):
-    """
-    Trigger analysis of a document.
-    
-    This endpoint starts the analysis process and returns a job ID.
-    Use the job ID to check status and retrieve results.
-    """
-    try:
-        # For now, this is a simplified implementation
-        # In production, this would trigger async processing
-        
-        analyzer = get_analyzer()
-        
-        # Create a mock job response
-        # TODO: Implement actual async job processing
-        job = AnalysisJob(
-            job_id=f"job_{request.document_id}_{len(request.selected_questions)}",
-            document_id=request.document_id,
-            question_set_id=request.question_set_id,
-            selected_questions=request.selected_questions,
-            status="pending",
-            progress=0.0
-        )
-        
-        return job
-        
-    except Exception as e:
-        logger.error(f"Analysis request failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/integrations", response_model=IntegrationsResponse)
-async def get_integrations():
-    """Get information about available integrations"""
-    integrations = get_available_integrations()
-    sources = list(get_document_sources().keys())
-    
-    return IntegrationsResponse(
-        available_integrations=integrations,
-        document_sources=sources
-    )
-
-@app.get("/health", response_model=Dict[str, Any])
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
+    return HealthResponse(status="healthy", version="0.1.0")
+
+@app.get("/question-sets", response_model=List[QuestionSet])
+async def get_question_sets():
+    """Get available question sets"""
     try:
-        # Check core dependencies
-        integrations = get_available_integrations()
-        sources = get_document_sources()
+        # Available question sets
+        question_sets = [
+            QuestionSet(id="tcfd", name="TCFD Framework", description="Task Force on Climate-related Financial Disclosures"),
+            QuestionSet(id="lucia", name="Lucia Framework", description="Lucia question set"),
+            QuestionSet(id="s4m", name="S4M Framework", description="S4M question set"),
+            QuestionSet(id="esg", name="ESG Framework", description="Environmental, Social, and Governance")
+        ]
+        return question_sets
+    except Exception as e:
+        logger.error(f"Error getting question sets: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/questions/{question_set_id}")
+async def get_questions(question_set_id: str):
+    """Get questions for a specific question set"""
+    try:
+        question_loader = get_question_loader()
+        questions = question_loader.get_questions(question_set_id)
+        return {"question_set": question_set_id, "questions": questions}
+    except Exception as e:
+        logger.error(f"Error loading questions for {question_set_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/analyze", response_model=AnalysisResponse)
+async def analyze_document(
+    file: UploadFile = File(...),
+    question_set: str = "tcfd",
+    chunk_size: int = 500,
+    chunk_overlap: int = 20,
+    top_k: int = 5,
+    model: str = "gpt-4o-mini"
+):
+    """Analyze a document with the specified question set"""
+    try:
+        # Validate file type
+        if not file.filename.endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
         
-        # Basic health checks
-        health_status = {
-            "status": "healthy",
-            "core_package": True,
-            "question_loader": True,
-            "analyzer": True,
-            "available_integrations": integrations,
-            "document_sources": list(sources.keys())
-        }
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+            shutil.copyfileobj(file.file, tmp_file)
+            tmp_path = tmp_file.name
         
-        # Test search backend if available
-        if integrations.get("search_backend", False):
-            try:
-                from report_analyst_search_backend.client import SearchBackendClient
-                # You could add a health check call here
-                health_status["search_backend_client"] = True
-            except Exception as e:
-                health_status["search_backend_client"] = False
-                health_status["search_backend_error"] = str(e)
+        try:
+            # Initialize analyzer
+            analyzer = get_analyzer()
+            
+            # Load questions
+            question_loader = get_question_loader()
+            questions = question_loader.get_questions(question_set)
+            
+            # Analyze document
+            results = analyzer.analyze_document(
+                file_path=tmp_path,
+                questions=questions,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                top_k=top_k,
+                model=model
+            )
+            
+            # Format response
+            response = AnalysisResponse(
+                filename=file.filename,
+                question_set=question_set,
+                results=results,
+                configuration={
+                    "chunk_size": chunk_size,
+                    "chunk_overlap": chunk_overlap,
+                    "top_k": top_k,
+                    "model": model
+                }
+            )
+            
+            return response
+            
+        finally:
+            # Clean up temporary file
+            os.unlink(tmp_path)
+            
+    except Exception as e:
+        logger.error(f"Error analyzing document: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/analyze-async")
+async def analyze_document_async(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    question_set: str = "tcfd",
+    chunk_size: int = 500,
+    chunk_overlap: int = 20,
+    top_k: int = 5,
+    model: str = "gpt-4o-mini"
+):
+    """Start asynchronous document analysis"""
+    try:
+        # Generate task ID
+        import uuid
+        task_id = str(uuid.uuid4())
         
-        return health_status
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+            shutil.copyfileobj(file.file, tmp_file)
+            tmp_path = tmp_file.name
+        
+        # Add background task
+        background_tasks.add_task(
+            process_document_async,
+            task_id,
+            tmp_path,
+            file.filename,
+            question_set,
+            chunk_size,
+            chunk_overlap,
+            top_k,
+            model
+        )
+        
+        return {"task_id": task_id, "status": "processing"}
         
     except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return {
-            "status": "unhealthy",
-            "error": str(e)
-        } 
+        logger.error(f"Error starting async analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def process_document_async(
+    task_id: str,
+    file_path: str,
+    filename: str,
+    question_set: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    top_k: int,
+    model: str
+):
+    """Process document in background"""
+    try:
+        logger.info(f"Starting async processing for task {task_id}")
+        
+        # Initialize analyzer
+        analyzer = get_analyzer()
+        
+        # Load questions
+        question_loader = get_question_loader()
+        questions = question_loader.get_questions(question_set)
+        
+        # Analyze document
+        results = analyzer.analyze_document(
+            file_path=file_path,
+            questions=questions,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            top_k=top_k,
+            model=model
+        )
+        
+        logger.info(f"Completed async processing for task {task_id}")
+        
+        # In a real implementation, you would store results in a database
+        # or cache for later retrieval
+        
+    except Exception as e:
+        logger.error(f"Error in async processing for task {task_id}: {e}")
+    finally:
+        # Clean up temporary file
+        if os.path.exists(file_path):
+            os.unlink(file_path)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000) 

@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Optional, Union
 from fastapi import UploadFile
 import fitz  # PyMuPDF
-from models.requests import DocumentMetadata
+from report_analyst.models.requests import DocumentMetadata
 import shutil
 
 class DocumentProcessor:

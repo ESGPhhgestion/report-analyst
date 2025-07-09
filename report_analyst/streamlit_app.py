@@ -18,6 +18,29 @@ from pandas.api.types import (
     is_object_dtype,
 )
 
+# Add parent directory to path for backend integration
+current_dir = Path(__file__).parent
+parent_dir = current_dir.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
+
+# Try to import backend integration features
+try:
+    from report_analyst_search_backend.config import (
+        configure_backend_integration, 
+        display_config_status,
+        BackendConfig
+    )
+    from report_analyst_search_backend.flow_orchestrator import (
+        create_flow_orchestrator,
+        needs_local_analysis,
+        ProcessingResult,
+        AnalysisResult
+    )
+    BACKEND_INTEGRATION_AVAILABLE = True
+except ImportError as e:
+    BACKEND_INTEGRATION_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -45,10 +68,10 @@ if str(current_dir) not in sys.path:
 logger.info(f"Added {current_dir} to Python path")
 
 # Keep relative imports
-from app.core.analyzer import DocumentAnalyzer
-from app.core.prompt_manager import PromptManager
-from app.core.dataframe_manager import create_analysis_dataframes, create_combined_dataframe
-from app.core.question_loader import get_question_loader
+from report_analyst.core.analyzer import DocumentAnalyzer
+from report_analyst.core.prompt_manager import PromptManager
+from report_analyst.core.dataframe_manager import create_analysis_dataframes, create_combined_dataframe
+from report_analyst.core.question_loader import get_question_loader
 
 # Load environment variables
 load_dotenv()
@@ -1142,6 +1165,17 @@ def main():
             return
 
         st.title("Report Analyst")
+        
+        # Backend Integration Section
+        if BACKEND_INTEGRATION_AVAILABLE:
+            with st.expander("🔧 Backend Integration", expanded=False):
+                config = configure_backend_integration()
+                display_config_status(config)
+        else:
+            # Show fallback info
+            with st.expander("🔧 Backend Integration", expanded=False):
+                st.warning("⚠️ Backend integration modules not available")
+                st.info("Install backend integration dependencies to enable advanced features")
         
         # Settings section - moved below the title
         with st.expander("Analysis Configuration", expanded=True):

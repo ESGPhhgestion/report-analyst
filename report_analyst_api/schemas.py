@@ -130,4 +130,36 @@ class HealthResponse(BaseModel):
     question_loader: bool = Field(..., description="Question loader status")
     analyzer: bool = Field(..., description="Analyzer status")
     available_integrations: Dict[str, bool] = Field(..., description="Integration status")
-    document_sources: List[str] = Field(..., description="Available document sources") 
+    document_sources: List[str] = Field(..., description="Available document sources")
+
+class AnalysisRequest(BaseModel):
+    """Request for document analysis"""
+    filename: str = Field(..., description="Name of the uploaded file")
+    question_set: str = Field("tcfd", description="Question set to use")
+    chunk_size: int = Field(500, description="Text chunk size")
+    chunk_overlap: int = Field(20, description="Overlap between chunks")
+    top_k: int = Field(5, description="Number of top chunks to consider")
+    model: str = Field("gpt-4o-mini", description="LLM model to use")
+
+class AnalysisResponse(BaseModel):
+    """Response from document analysis"""
+    filename: str = Field(..., description="Name of the analyzed file")
+    question_set: str = Field(..., description="Question set used")
+    results: List[Dict[str, Any]] = Field(..., description="Analysis results")
+    configuration: Dict[str, Any] = Field(..., description="Analysis configuration")
+    timestamp: datetime = Field(default_factory=datetime.now, description="Analysis timestamp")
+
+class AsyncJobResponse(BaseModel):
+    """Async job response"""
+    task_id: str = Field(..., description="Unique task identifier")
+    status: str = Field(..., description="Job status")
+    timestamp: datetime = Field(default_factory=datetime.now, description="Job creation timestamp")
+
+class JobStatus(BaseModel):
+    """Job status information"""
+    task_id: str = Field(..., description="Unique task identifier")
+    status: str = Field(..., description="Current job status")
+    progress: float = Field(0.0, description="Job progress percentage")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    results: Optional[List[Dict[str, Any]]] = Field(None, description="Analysis results if completed")
+    timestamp: datetime = Field(default_factory=datetime.now, description="Status timestamp") 

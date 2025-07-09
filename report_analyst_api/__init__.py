@@ -1,8 +1,7 @@
 """
 Report Analyst API Module
 
-This module provides FastAPI endpoints for the report analyst functionality.
-Can be licensed separately from the core package.
+FastAPI-based API for document analysis.
 """
 
 __version__ = "0.1.0"

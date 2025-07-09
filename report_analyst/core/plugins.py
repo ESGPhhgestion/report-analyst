@@ -26,7 +26,14 @@ def discover_document_sources() -> Dict[str, Type]:
     # Try to load search backend integration
     try:
         from report_analyst_search_backend import SearchBackendSource
-        sources["search_backend"] = SearchBackendSource
+        from .config import config
+        
+        # Create factory function that uses configuration
+        def create_search_backend_source():
+            backend_config = config.get_search_backend_config()
+            return SearchBackendSource(backend_config["url"], backend_config["api_key"])
+        
+        sources["search_backend"] = create_search_backend_source
         logger.info("Search backend integration available")
     except ImportError:
         logger.debug("Search backend integration not installed")

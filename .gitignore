@@ -14,3 +14,4 @@ __pycache__/
 /app/storage/
 /app/cache/
 **/storage/cache/
+report_analyst/temp/*
