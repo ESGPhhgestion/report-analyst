@@ -18,6 +18,20 @@ from pandas.api.types import (
     is_object_dtype,
 )
 
+# Add the report-analyst directory to the Python path for backend integration
+current_dir = Path(__file__).parent.parent
+if str(current_dir) not in sys.path:
+    sys.path.append(str(current_dir))
+
+# Import backend integration modules
+try:
+    from report_analyst_search_backend.flow_orchestrator import create_flow_orchestrator
+    from report_analyst_search_backend.config import BackendConfig, configure_backend_integration
+    BACKEND_INTEGRATION_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Backend integration not available: {e}")
+    BACKEND_INTEGRATION_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -1145,6 +1159,24 @@ def main():
         
         # Settings section - moved below the title
         with st.expander("Analysis Configuration", expanded=True):
+            # Enterprise Integration Settings
+            st.subheader("🚀 Enterprise Integration")
+            col1, col2 = st.columns(2)
+            with col1:
+                use_s3_upload = st.checkbox(
+                    "Enable S3+NATS Upload", 
+                    value=os.getenv("USE_S3_UPLOAD", "false").lower() == "true",
+                    key="use_s3_upload",
+                    help="Upload documents via S3 and process via NATS for enterprise integration with backend"
+                )
+            with col2:
+                if use_s3_upload:
+                    st.success("✅ Enterprise mode enabled - documents will be processed via S3+NATS")
+                else:
+                    st.info("📁 Local mode - documents processed locally")
+            
+            st.divider()
+            
             # Question set selection
             col1, col2 = st.columns([1, 2])
             with col1:
@@ -1386,24 +1418,102 @@ def main():
 
         # Upload New tab
         with upload_tab:
-            uploaded_file = st.file_uploader("Choose a PDF file", type="pdf", key="file_uploader")
-            if uploaded_file:
-                file_path = save_uploaded_file(uploaded_file)
-                logger.info(f"[UPLOAD] Saved uploaded file: {uploaded_file.name} at {file_path}")
-                if file_path and file_path != st.session_state.get('current_file'):
-                    st.session_state.current_file = file_path
-                    st.session_state.uploaded_file = uploaded_file
-                    st.session_state.analysis_complete = False
-                    st.session_state.analysis_triggered = False
-                    if 'results' in st.session_state:
-                        del st.session_state.results
-                    logger.info(f"[UPLOAD] Added file to session state: {uploaded_file.name}")
-                    st.success(f"File uploaded successfully: {uploaded_file.name}")
-                    logger.info(f"[UPLOAD] Displaying cache selector for file: {file_path}")
-                    display_cache_selector(file_path)
-                    if not st.session_state.get('file_processed'):
-                        st.session_state.file_processed = True
-                        st.rerun()
+            # Check if S3+NATS enterprise integration is enabled (from UI checkbox)
+            use_s3_upload = st.session_state.get('use_s3_upload', False)
+            
+            if use_s3_upload and BACKEND_INTEGRATION_AVAILABLE:
+                st.info("🚀 Enterprise Mode: Using S3+NATS integration for document processing")
+                
+                # Initialize backend integration with S3+NATS enabled
+                if ('backend_config' not in st.session_state or 
+                    not getattr(st.session_state.get('backend_config'), 'use_backend', False)):
+                    # Create a custom config for S3+NATS enterprise mode
+                    from report_analyst_search_backend.config import BackendConfig
+                    st.session_state.backend_config = BackendConfig(
+                        use_backend=True,  # Enable backend integration
+                        backend_url=os.getenv("BACKEND_URL", "http://localhost:8000"),
+                        use_centralized_llm=True,  # Enable for enterprise mode
+                        use_data_lake=False,
+                        use_full_backend_analysis=False,
+                        nats_url=os.getenv("NATS_URL", "nats://localhost:4222"),
+                        owner="report-analyst",
+                        deployment_type="enterprise",
+                        experiment_name="S3+NATS Upload"
+                    )
+                    st.session_state.flow_orchestrator = create_flow_orchestrator(st.session_state.backend_config)
+                
+                uploaded_file = st.file_uploader("Choose a PDF file", type="pdf", key="file_uploader")
+                if uploaded_file:
+                    # Use S3+NATS enterprise flow
+                    with st.spinner("🚀 Uploading to S3 and triggering backend processing..."):
+                        try:
+                            # Debug: Check if backend_service exists
+                            orchestrator = st.session_state.get('flow_orchestrator')
+                            backend_service = getattr(orchestrator, 'backend_service', None) if orchestrator else None
+                            
+                            logger.info(f"[ENTERPRISE] Debug - orchestrator: {orchestrator is not None}")
+                            logger.info(f"[ENTERPRISE] Debug - backend_service: {backend_service is not None}")
+                            
+                            if not backend_service:
+                                raise Exception("Backend service not initialized properly")
+                            
+                            # Get file bytes
+                            file_bytes = uploaded_file.getbuffer()
+                            
+                            # Process via S3+NATS flow
+                            result = asyncio.run(
+                                backend_service.upload_pdf(file_bytes, uploaded_file.name)
+                            )
+                            
+                            if result:
+                                st.success(f"✅ File uploaded via S3+NATS: {uploaded_file.name}")
+                                st.info("📋 Document is being processed by the backend. Check the backend for chunks and analysis.")
+                                
+                                # Store the resource ID for later use
+                                st.session_state.enterprise_resource_id = result
+                                st.session_state.enterprise_upload_complete = True
+                                
+                                logger.info(f"[ENTERPRISE] S3+NATS upload successful: {uploaded_file.name} -> resource_id: {result}")
+                            else:
+                                st.error("❌ S3+NATS upload failed")
+                                
+                        except Exception as e:
+                            logger.error(f"[ENTERPRISE] S3+NATS upload error: {str(e)}")
+                            st.error(f"❌ Enterprise upload failed: {str(e)}")
+                            st.info("🔄 Falling back to local processing...")
+                            
+                            # Fallback to local processing
+                            file_path = save_uploaded_file(uploaded_file)
+                            if file_path:
+                                st.session_state.current_file = file_path
+                                st.session_state.uploaded_file = uploaded_file
+                                st.success(f"File uploaded locally: {uploaded_file.name}")
+                                display_cache_selector(file_path)
+            else:
+                # Standard local upload flow
+                if use_s3_upload and not BACKEND_INTEGRATION_AVAILABLE:
+                    st.warning("⚠️ Enterprise mode enabled but backend integration not available. Using local processing.")
+                elif not use_s3_upload:
+                    st.info("📁 Local mode: Processing documents locally")
+                
+                uploaded_file = st.file_uploader("Choose a PDF file", type="pdf", key="file_uploader")
+                if uploaded_file:
+                    file_path = save_uploaded_file(uploaded_file)
+                    logger.info(f"[UPLOAD] Saved uploaded file: {uploaded_file.name} at {file_path}")
+                    if file_path and file_path != st.session_state.get('current_file'):
+                        st.session_state.current_file = file_path
+                        st.session_state.uploaded_file = uploaded_file
+                        st.session_state.analysis_complete = False
+                        st.session_state.analysis_triggered = False
+                        if 'results' in st.session_state:
+                            del st.session_state.results
+                        logger.info(f"[UPLOAD] Added file to session state: {uploaded_file.name}")
+                        st.success(f"File uploaded successfully: {uploaded_file.name}")
+                        logger.info(f"[UPLOAD] Displaying cache selector for file: {file_path}")
+                        display_cache_selector(file_path)
+                        if not st.session_state.get('file_processed'):
+                            st.session_state.file_processed = True
+                            st.rerun()
 
         # Consolidated Results tab
         with consolidated_tab:

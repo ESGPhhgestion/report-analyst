@@ -118,7 +118,8 @@ class FlowOrchestrator:
             # Step 1: Upload
             with st.spinner("Uploading document to backend..."):
                 file_bytes = uploaded_file.read()
-                resource_id = self.backend_service.upload_pdf(file_bytes, uploaded_file.name)
+                import asyncio
+                resource_id = asyncio.run(self.backend_service.upload_pdf(file_bytes, uploaded_file.name))
                 st.success(f"✅ Document uploaded! Resource ID: {resource_id}")
             
             # Step 2: Wait for processing
@@ -180,7 +181,8 @@ class FlowOrchestrator:
             # Upload
             with st.spinner("Uploading document to backend..."):
                 file_bytes = uploaded_file.read()
-                resource_id = self.backend_service.upload_pdf(file_bytes, uploaded_file.name)
+                import asyncio
+                resource_id = asyncio.run(self.backend_service.upload_pdf(file_bytes, uploaded_file.name))
                 st.success(f"✅ Document uploaded! Resource ID: {resource_id}")
             
             # Wait for processing
