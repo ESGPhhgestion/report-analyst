@@ -6,7 +6,7 @@ NATS events when document processing is complete.
 
 Usage in search backend services.py:
     from report_analyst_jobs.search_backend_integration import notify_document_ready
-    
+
     # At the end of your PDF processing Celery task:
     await notify_document_ready(resource_id, document_url, chunks_count)
 """

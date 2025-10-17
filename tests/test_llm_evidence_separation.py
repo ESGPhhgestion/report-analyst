@@ -5,7 +5,7 @@ Test script to verify that LLM score and evidence determination are properly sep
 This test validates the core fix for the issue where LLM score was incorrectly coupled
 to evidence determination. The acceptance criteria are:
 
-1. LLM score is independent from is_evidence  
+1. LLM score is independent from is_evidence
 2. Chunks are stored with vector similarity and LLM score before interaction with LLM
 3. After interaction with LLM we update only the is_evidence column
 4. Display uses the fields from the database correctly

@@ -3,7 +3,7 @@ NATS Integration MVP for Report Analyst Jobs
 
 Flow:
 1. Client → Search Backend REST API (upload PDF)
-2. Search Backend → Celery job (PDF processing, chunking, embedding) 
+2. Search Backend → Celery job (PDF processing, chunking, embedding)
 3. When PDF processing complete → Publish "document.ready" to NATS
 4. NATS Worker → Receives "document.ready", runs analysis using existing chunks
 5. Analysis complete → Publish results back via NATS

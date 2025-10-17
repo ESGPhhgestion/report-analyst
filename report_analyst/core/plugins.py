@@ -1,7 +1,7 @@
 """
 Plugin Discovery System
 
-This module handles discovery and loading of optional modules like API and 
+This module handles discovery and loading of optional modules like API and
 search backend integration, following a modular architecture pattern.
 """
 

@@ -2,7 +2,7 @@
 Job Coordination System (Core)
 
 This package provides basic job coordination using NATS for the core report_analyst package.
-For universal analysis functions that can be integrated into Lambda/Celery/etc., 
+For universal analysis functions that can be integrated into Lambda/Celery/etc.,
 use the separate `report_analyst_jobs` module instead.
 
 This core jobs system is primarily for:
