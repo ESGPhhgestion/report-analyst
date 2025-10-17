@@ -11,18 +11,23 @@ This core jobs system is primarily for:
 - Integration with the Streamlit app
 """
 
-from .interfaces import JobDefinition, JobResult, JobStatus, ExecutionBackend, AnalysisJobDefinition
 from .coordinator import JobCoordinator, create_job_coordinator
+from .interfaces import (
+    AnalysisJobDefinition,
+    ExecutionBackend,
+    JobDefinition,
+    JobResult,
+    JobStatus,
+)
 
 __all__ = [
     # Core interfaces
     "JobDefinition",
-    "JobResult", 
+    "JobResult",
     "JobStatus",
     "ExecutionBackend",
     "AnalysisJobDefinition",
-    
     # Job coordination
     "JobCoordinator",
-    "create_job_coordinator"
-] 
+    "create_job_coordinator",
+]

@@ -2,13 +2,15 @@
 Tests for the QuestionSetLoader functionality
 """
 
-import pytest
-import tempfile
 import os
+import tempfile
+
+import pytest
 import yaml
+
 from report_analyst.core.question_loader import (
-    QuestionSetLoader,
     QuestionSet,
+    QuestionSetLoader,
     get_question_loader,
 )
 

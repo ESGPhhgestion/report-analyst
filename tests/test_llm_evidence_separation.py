@@ -13,13 +13,14 @@ to evidence determination. The acceptance criteria are:
 This addresses the user requirement: "llm score is independent from is evidence"
 """
 
-import sys
-import os
-import tempfile
-import sqlite3
 import json
-import pytest
+import os
+import sqlite3
+import sys
+import tempfile
 from pathlib import Path
+
+import pytest
 
 # Add the app directory to the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
