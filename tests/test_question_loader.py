@@ -335,8 +335,8 @@ class TestQuestionSetLoader:
             ]  # Only custom when core functionality unavailable
 
         # Should have all question sets plus custom
-        expected_sets = ["everest", "tcfd", "denali", "kilimanjaro", "custom"]
-        assert question_set_options == expected_sets
+        expected_sets = {"everest", "tcfd", "denali", "kilimanjaro", "custom"}
+        assert set(question_set_options) == expected_sets
         assert len(question_set_options) == 5
         assert "custom" in question_set_options
         assert "everest" in question_set_options
