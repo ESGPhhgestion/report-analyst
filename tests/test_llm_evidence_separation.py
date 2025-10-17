@@ -24,7 +24,7 @@ from pathlib import Path
 # Add the app directory to the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from app.core.cache_manager import CacheManager
+from report_analyst.core.cache_manager import CacheManager
 
 class TestLLMEvidenceSeparation:
     """Test suite for LLM score and evidence separation."""

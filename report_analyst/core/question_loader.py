@@ -20,6 +20,7 @@ class QuestionSet:
     id: str
     name: str
     description: str
+    shortcut: str  # short display name for UI
     questions: Dict[str, Dict[str, str]]  # question_id -> {text, guidelines}
 
 class QuestionSetLoader:
@@ -84,6 +85,7 @@ class QuestionSetLoader:
                     id=question_set_id,
                     name=config.get('name', f'{question_set_id.title()} Question Set'),
                     description=config.get('description', ''),
+                    shortcut=config.get('shortcut', question_set_id),
                     questions=questions
                 )
                 
@@ -131,6 +133,10 @@ class QuestionSetLoader:
         """Get questions for a specific question set"""
         question_set = self.get_question_set(question_set_id)
         return question_set.questions if question_set else {}
+    
+    def get_question_set_options(self) -> List[str]:
+        """Get list of question set IDs for UI dropdown options"""
+        return list(self.get_question_sets().keys())
     
     def reload(self):
         """Force reload of question sets"""

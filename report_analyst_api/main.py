@@ -71,13 +71,19 @@ async def health_check():
 async def get_question_sets():
     """Get available question sets"""
     try:
-        # Available question sets
-        question_sets = [
-            QuestionSet(id="tcfd", name="TCFD Framework", description="Task Force on Climate-related Financial Disclosures"),
-            QuestionSet(id="lucia", name="Lucia Framework", description="Lucia question set"),
-            QuestionSet(id="s4m", name="S4M Framework", description="S4M question set"),
-            QuestionSet(id="esg", name="ESG Framework", description="Environmental, Social, and Governance")
-        ]
+        # Get question sets dynamically from question loader
+        question_loader_instance = get_question_loader()
+        question_sets_data = question_loader_instance.get_question_sets()
+        
+        # Convert to API response format
+        question_sets = []
+        for qset in question_sets_data.values():
+            question_sets.append(QuestionSet(
+                id=qset.id,
+                name=qset.name,
+                description=qset.description
+            ))
+        
         return question_sets
     except Exception as e:
         logger.error(f"Error getting question sets: {e}")

@@ -116,9 +116,10 @@ def handle_complete_backend_flow(orchestrator, uploaded_file, config: BackendCon
     st.header("🏭 Complete Backend Analysis")
     
     # Select question set
+    question_set_options = question_loader.get_question_set_options() if CORE_FUNCTIONALITY_AVAILABLE else ["tcfd", "kilimanjaro", "denali"]
     question_set = st.selectbox(
         "Select Question Set",
-        options=["tcfd", "s4m", "lucia"],
+        options=question_set_options,
         help="Question set for backend analysis"
     )
     
@@ -184,9 +185,10 @@ def run_analysis_section(orchestrator, config: BackendConfig):
 def configure_questions() -> List[str]:
     """Configure questions for analysis"""
     
+    question_set_options = question_loader.get_question_set_options() + ["custom"] if CORE_FUNCTIONALITY_AVAILABLE else ["tcfd", "kilimanjaro", "denali", "custom"]
     question_set_name = st.selectbox(
         "Select Question Set",
-        options=["tcfd", "s4m", "lucia", "custom"],
+        options=question_set_options,
         help="Choose a predefined question set or create custom questions"
     )
     
@@ -330,9 +332,10 @@ def run_fallback_mode():
     st.header("🔍 Document Analysis")
     
     if CORE_FUNCTIONALITY_AVAILABLE:
+        question_set_options = question_loader.get_question_set_options() + ["custom"]
         question_set_name = st.selectbox(
             "Select Question Set",
-            options=["tcfd", "s4m", "lucia", "custom"],
+            options=question_set_options,
             help="Choose a predefined question set or create custom questions"
         )
         

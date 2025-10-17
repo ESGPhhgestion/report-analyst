@@ -38,8 +38,8 @@ This project uses a **mountain peak naming convention** for question sets to ena
 ### Current Question Sets:
 - **`everest_questions.yaml`** - Comprehensive sustainability labeling framework (35 questions, prefix: `ev_`)
 - **`tcfd_questions.yaml`** - TCFD climate disclosure questions (prefix: `tcfd_`)
-- **`s4m_questions.yaml`** - Score4More sustainability questions (prefix: `s4m_`)
-- **`lucia_questions.yaml`** - Lucia sustainability analysis questions (prefix: `lucia_`)
+- **`kilimanjaro_questions.yaml`** - Kilimanjaro sustainability questions (prefix: `kilimanjaro_`)
+- **`denali_questions.yaml`** - Denali sustainability analysis questions (prefix: `denali_`)
 
 ### Future Naming Pattern:
 | Version | Mountain | File | Prefix |

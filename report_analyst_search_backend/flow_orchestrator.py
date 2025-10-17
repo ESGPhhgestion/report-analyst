@@ -9,9 +9,26 @@ import streamlit as st
 from typing import Dict, Any, List, Optional, Union
 from dataclasses import dataclass
 import logging
+import sys
+from pathlib import Path
 
 from .config import BackendConfig
 from .backend_service import BackendService, BackendServiceError, handle_backend_error
+
+# Add parent directory to path for question loader import
+current_dir = Path(__file__).parent
+parent_dir = current_dir.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
+
+# Import question loader for dynamic question set loading
+try:
+    from report_analyst.core.question_loader import get_question_loader
+    question_loader = get_question_loader()
+    QUESTION_LOADER_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Question loader not available: {e}")
+    QUESTION_LOADER_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -250,10 +267,22 @@ class FlowOrchestrator:
         """Configure question set for backend analysis"""
         st.subheader("🔍 Analysis Configuration")
         
+        # Get dynamic question set options
+        if QUESTION_LOADER_AVAILABLE:
+            question_set_options = question_loader.get_question_set_options() + ["custom"]
+            # Calculate index for default question set
+            try:
+                index = question_set_options.index(default_question_set) if default_question_set in question_set_options else 0
+            except ValueError:
+                index = 0
+        else:
+            question_set_options = ["tcfd", "kilimanjaro", "denali", "custom"]
+            index = 0 if default_question_set == "tcfd" else ["tcfd", "kilimanjaro", "denali"].index(default_question_set) if default_question_set in ["kilimanjaro", "denali"] else 0
+        
         question_set = st.selectbox(
             "Select Question Set for Backend Analysis",
-            options=["tcfd", "s4m", "lucia", "custom"],
-            index=0 if default_question_set == "tcfd" else ["tcfd", "s4m", "lucia"].index(default_question_set) if default_question_set in ["s4m", "lucia"] else 0,
+            options=question_set_options,
+            index=index,
             help="Choose question set for backend to analyze"
         )
         

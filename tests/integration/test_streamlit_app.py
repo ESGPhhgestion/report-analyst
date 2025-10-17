@@ -13,9 +13,9 @@ from datetime import datetime
 import asyncio
 
 # Use relative imports
-from app.streamlit_app import ReportAnalyzer, save_uploaded_file, display_dataframes
-from app.core.analyzer import DocumentAnalyzer
-from app.core.cache_manager import CacheManager
+from report_analyst.streamlit_app import ReportAnalyzer, save_uploaded_file, display_dataframes
+from report_analyst.core.analyzer import DocumentAnalyzer
+from report_analyst.core.cache_manager import CacheManager
 
 @pytest.fixture
 def mock_streamlit():
@@ -126,12 +126,12 @@ def test_load_question_set(report_analyzer, test_env):
         ]
     }
     
-    with patch('yaml.safe_load', return_value=test_questions):
-        question_set = report_analyzer.load_question_set('tcfd')
-        assert 'questions' in question_set
-        assert len(question_set['questions']) == 2
-        assert 'tcfd_1' in question_set['questions']
-        assert 'tcfd_2' in question_set['questions']
+    # Test with actual TCFD questions (not mocked)
+    question_set = report_analyzer.load_question_set('tcfd')
+    assert 'questions' in question_set
+    assert len(question_set['questions']) == 11  # TCFD has 11 questions
+    assert 'tcfd_1' in question_set['questions']
+    assert 'tcfd_11' in question_set['questions']
 
 @pytest.mark.asyncio
 async def test_analyze_document(report_analyzer, test_env):
