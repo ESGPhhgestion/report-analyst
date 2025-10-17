@@ -276,8 +276,9 @@ class FlowOrchestrator:
             except ValueError:
                 index = 0
         else:
-            question_set_options = ["tcfd", "kilimanjaro", "denali", "custom"]
-            index = 0 if default_question_set == "tcfd" else ["tcfd", "kilimanjaro", "denali"].index(default_question_set) if default_question_set in ["kilimanjaro", "denali"] else 0
+            # Fallback: use a generic approach without hardcoded names
+            question_set_options = ["custom"]  # Only custom when question loader unavailable
+            index = 0
         
         question_set = st.selectbox(
             "Select Question Set for Backend Analysis",

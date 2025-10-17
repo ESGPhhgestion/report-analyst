@@ -116,7 +116,11 @@ def handle_complete_backend_flow(orchestrator, uploaded_file, config: BackendCon
     st.header("🏭 Complete Backend Analysis")
     
     # Select question set
-    question_set_options = question_loader.get_question_set_options() if CORE_FUNCTIONALITY_AVAILABLE else ["tcfd", "kilimanjaro", "denali"]
+    if CORE_FUNCTIONALITY_AVAILABLE:
+        question_set_options = question_loader.get_question_set_options()
+    else:
+        # Fallback: use a generic approach without hardcoded names
+        question_set_options = []  # No predefined options when core functionality unavailable
     question_set = st.selectbox(
         "Select Question Set",
         options=question_set_options,
@@ -185,7 +189,11 @@ def run_analysis_section(orchestrator, config: BackendConfig):
 def configure_questions() -> List[str]:
     """Configure questions for analysis"""
     
-    question_set_options = question_loader.get_question_set_options() + ["custom"] if CORE_FUNCTIONALITY_AVAILABLE else ["tcfd", "kilimanjaro", "denali", "custom"]
+    if CORE_FUNCTIONALITY_AVAILABLE:
+        question_set_options = question_loader.get_question_set_options() + ["custom"]
+    else:
+        # Fallback: use a generic approach without hardcoded names
+        question_set_options = ["custom"]  # Only custom when core functionality unavailable
     question_set_name = st.selectbox(
         "Select Question Set",
         options=question_set_options,

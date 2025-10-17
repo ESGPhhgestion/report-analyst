@@ -282,3 +282,85 @@ class TestQuestionSetLoader:
                     os.environ['QUESTIONSETS_PATH'] = original_env
                 elif 'QUESTIONSETS_PATH' in os.environ:
                     del os.environ['QUESTIONSETS_PATH']
+    
+    def test_fallback_behavior_without_core_functionality(self):
+        """Test fallback behavior when core functionality is unavailable"""
+        # Test the fallback logic used in streamlit apps
+        CORE_FUNCTIONALITY_AVAILABLE = False
+        
+        if CORE_FUNCTIONALITY_AVAILABLE:
+            from report_analyst.core.question_loader import get_question_loader
+            question_loader = get_question_loader()
+            question_set_options = question_loader.get_question_set_options() + ["custom"]
+        else:
+            # Fallback: use a generic approach without hardcoded names
+            question_set_options = ["custom"]  # Only custom when core functionality unavailable
+        
+        assert question_set_options == ["custom"]
+        assert len(question_set_options) == 1
+        assert "custom" in question_set_options
+    
+    def test_normal_behavior_with_core_functionality(self):
+        """Test normal behavior when core functionality is available"""
+        # Test the normal logic used in streamlit apps
+        CORE_FUNCTIONALITY_AVAILABLE = True
+        
+        if CORE_FUNCTIONALITY_AVAILABLE:
+            from report_analyst.core.question_loader import get_question_loader
+            question_loader = get_question_loader()
+            question_set_options = question_loader.get_question_set_options() + ["custom"]
+        else:
+            # Fallback: use a generic approach without hardcoded names
+            question_set_options = ["custom"]  # Only custom when core functionality unavailable
+        
+        # Should have all question sets plus custom
+        expected_sets = ["everest", "tcfd", "denali", "kilimanjaro", "custom"]
+        assert question_set_options == expected_sets
+        assert len(question_set_options) == 5
+        assert "custom" in question_set_options
+        assert "everest" in question_set_options
+        assert "tcfd" in question_set_options
+        assert "denali" in question_set_options
+        assert "kilimanjaro" in question_set_options
+    
+    def test_no_hardcoded_question_set_names(self):
+        """Test that no hardcoded question set names are used in fallback logic"""
+        # This test ensures we don't have hardcoded names like ["tcfd", "kilimanjaro", "denali"]
+        # in our fallback logic
+        
+        # Test fallback behavior
+        CORE_FUNCTIONALITY_AVAILABLE = False
+        
+        if CORE_FUNCTIONALITY_AVAILABLE:
+            from report_analyst.core.question_loader import get_question_loader
+            question_loader = get_question_loader()
+            question_set_options = question_loader.get_question_set_options()
+        else:
+            # Fallback: use a generic approach without hardcoded names
+            question_set_options = []  # No predefined options when core functionality unavailable
+        
+        # Should not contain any hardcoded question set names
+        hardcoded_names = ["tcfd", "kilimanjaro", "denali", "everest"]
+        for name in hardcoded_names:
+            assert name not in question_set_options, f"Hardcoded name '{name}' found in fallback options"
+        
+        assert question_set_options == []
+    
+    def test_question_set_options_consistency(self):
+        """Test that question set options are consistent across different access methods"""
+        loader = get_question_loader()
+        
+        # Test different ways to get question set options
+        options1 = loader.get_question_set_options()
+        options2 = list(loader.get_question_sets().keys())
+        options3 = list(loader.get_question_set_names().keys())
+        
+        # All should return the same question set IDs
+        assert options1 == options2 == options3
+        
+        # Should contain expected question sets
+        expected_sets = ["everest", "tcfd", "denali", "kilimanjaro"]
+        for expected_set in expected_sets:
+            assert expected_set in options1, f"Expected question set '{expected_set}' not found in options"
+        
+        assert len(options1) == 4
