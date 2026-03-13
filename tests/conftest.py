@@ -17,11 +17,16 @@ if _env.exists():
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 import json
+import os
 import tempfile
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
+from dotenv import load_dotenv
+
+# Load environment variables from .env file before any other imports
+load_dotenv()
 
 from report_analyst_jobs.event_router import IGNORE_ACTION, EventRouter
 
