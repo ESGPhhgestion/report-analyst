@@ -218,7 +218,6 @@ class ReportAnalyzer:
                 use_llm_scoring,
                 single_call,
                 force_recompute,
-                pre_retrieved_chunks=pre_retrieved_chunks,
             ):
                 # Pass through status and error messages
                 if "status" in result or "error" in result:
