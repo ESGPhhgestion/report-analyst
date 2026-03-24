@@ -522,7 +522,6 @@ async def analyze_document_and_display(
                 use_llm_scoring,
                 single_call,
                 force_recompute,
-                pre_retrieved_chunks=pre_retrieved_chunks,
             ):
                 # Add debug logging to see what results we're getting
                 log_analysis_step(f"Received result: {str(result)[:200]}...")
@@ -1391,7 +1390,7 @@ async def run_analysis(analyzer, file_path, selected_questions, progress_text):
                 progress_text.warning(f"Invalid question ID format: {q_id}")
 
         # Check if we have pre-retrieved chunks (for backend resources)
-        pre_retrieved_chunks = st.session_state.get("backend_chunks")
+        
 
         # First update the analyzer's process_document method to use progress_text instead of yielding status
         async for result in analyzer.process_document(
@@ -1399,7 +1398,7 @@ async def run_analysis(analyzer, file_path, selected_questions, progress_text):
             selected_questions=question_numbers,  # Pass just the numbers
             use_llm_scoring=st.session_state.get("new_llm_scoring", False),  # Use the checkbox value directly
             force_recompute=st.session_state.get("force_recompute", False),
-            pre_retrieved_chunks=pre_retrieved_chunks,  # Pass backend chunks if available
+            # Pass backend chunks if available
         ):
             # Handle errors by displaying them but not storing them
             if "error" in result:
