@@ -22,7 +22,7 @@ from llama_index.core import Document, Settings
 from llama_index.core.ingestion import IngestionCache
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.embeddings.gemini import GeminiEmbedding
 from llama_index.readers.file import PyMuPDFReader
 
 from .cache_manager import CacheManager
@@ -165,19 +165,15 @@ class DocumentAnalyzer:
                 )
 
                 # Initialize embeddings if OpenAI API key is available
-                if openai_key and openai_key != "backend-handles-llm":
-                    self.embeddings = OpenAIEmbedding(
-                        api_key=openai_key,
-                        api_base=os.getenv("OPENAI_API_BASE"),
-                        model_name=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-ada-002"),
-                        embed_batch_size=100,
-                    )
-
-                    # Configure embeddings globally for LlamaIndex
-                    Settings.embed_model = self.embeddings
-                else:
-                    logger.warning("No OpenAI API key - embedding functionality will be limited")
-                    self.embeddings = None
+        if gemini_key and gemini_key != "backend-handles-llm":
+                self.embeddings = GeminiEmbedding(
+                    api_key=gemini_key,
+                    model_name="models/embedding-001",
+                )
+            Settings.embed_model = self.embeddings
+        else:
+            logger.warning("No Google API key - embedding functionality will be limited")
+            self.embeddings = None
 
             except Exception as e:
                 log_analysis_step(f"Error initializing local LLM clients: {str(e)}", "error")
